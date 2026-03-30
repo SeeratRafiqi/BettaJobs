@@ -1752,7 +1752,31 @@ Return ONLY valid JSON: { "question": "Your single interview line or question he
   }): Promise<{ candidateSummary: string; recruiterSummary: string; _usage?: { input_tokens: number; output_tokens: number; total_tokens: number } }> {
     const { jobTitle, questions, answers, expressionSummary } = params;
 
-    const rawAnswers = (answers || []).map((a) => (a || '').trim());
+    const shouldSkipAnswerForSummary = (a: string): boolean => {
+      const t = (a || '').trim();
+      if (!t) return true;
+      const lower = t.toLowerCase();
+      if (lower === '(no answer provided)' || lower === '(no answer)') return true;
+      if (/^\(silence\s*\d+\s*s\)$/i.test(t)) return true;
+      return false;
+    };
+
+    const isConnectionCheckQuestion = (q: string): boolean => {
+      const s = (q || '').trim().toLowerCase();
+      if (!s) return false;
+      return /still there|can you hear|just checking|are you there|no response|hear me/.test(s);
+    };
+
+    const filteredPairs: { q: string; a: string }[] = [];
+    for (let i = 0; i < (questions || []).length; i++) {
+      const q = questions[i] ?? '';
+      const a = answers[i] ?? '';
+      if (shouldSkipAnswerForSummary(a)) continue;
+      if (isConnectionCheckQuestion(q)) continue;
+      filteredPairs.push({ q, a });
+    }
+
+    const rawAnswers = filteredPairs.map((p) => (p.a || '').trim());
     const normalizedAnswers = rawAnswers.map((a) => a.toLowerCase());
     const placeholderPatterns = ['(no answer)', 'no answer provided', 'n/a', 'na', 'none', '—', '--'];
     const totalLength = rawAnswers.join(' ').length;
@@ -1768,12 +1792,12 @@ Return ONLY valid JSON: { "question": "Your single interview line or question he
     const fallbackRecruiter = `The candidate completed the voice interview but did not provide substantive answers (empty, minimal, or non-meaningful). Review the full Q&A transcript and follow up if needed.`;
     const fallbackCandidate = `Your answers in this interview were limited. Review the questions below and consider preparing more detailed responses for future interviews.`;
 
-    if (allPlaceholderOrEmpty || veryShortOrEmpty || looksLikeGibberish || sameCharRepeated) {
+    if (filteredPairs.length === 0 || allPlaceholderOrEmpty || veryShortOrEmpty || looksLikeGibberish || sameCharRepeated) {
       return { candidateSummary: fallbackCandidate, recruiterSummary: fallbackRecruiter };
     }
 
-    const qaList = questions
-      .map((q, i) => `Question ${i + 1}: ${q}\nCandidate answer: "${(answers[i] ?? '(No answer)').trim()}"`)
+    const qaList = filteredPairs
+      .map((pair, i) => `Question ${i + 1}: ${pair.q}\nCandidate answer: "${pair.a.trim()}"`)
       .join('\n\n');
     const demeanorNote = expressionSummary ? `\nDemeanor/expression (from video): ${expressionSummary}\n` : '';
 
@@ -1786,10 +1810,10 @@ ${qaList.substring(0, 4500)}
 ${demeanorNote}
 
 ## 1) candidateSummary (for the candidate)
-Write a short report FOR THE CANDIDATE. Tone: constructive and helpful. Include:
-- What they did well (only if clearly shown in answers).
-- Flaws or what they said wrong / could improve (e.g. vague answers, missing examples, weak technical depth).
-- Concrete suggestions: what to improve for next time (e.g. "Give a specific example when asked about X", "Expand on your role in Y").
+Write a short report FOR THE CANDIDATE. Address them directly using **you** and **your** throughout (never "the candidate" or third person). Tone: warm, personal, and encouraging—like a supportive mentor who believes in their growth. Be constructive, not harsh. Include:
+- What you did well (only if clearly shown in your answers).
+- What you could sharpen next time (e.g. vague moments, where a concrete example would help, technical depth).
+- Practical suggestions you can use in your next interview (e.g. "When you're asked about X, try naming a specific story from your experience").
 Do NOT include recruiter-only content (fit for role, hire/don't hire). Keep it to 1–2 short paragraphs.
 
 ## 2) recruiterSummary (for the recruiter)
@@ -1852,6 +1876,7 @@ Return ONLY valid JSON:
     const { jobTitle, jobDescription, jobSkills, candidateContext, count = 5, preferredLanguage } = params;
     const langCode = (preferredLanguage || 'en').split('-')[0];
     const languageName = QwenService.LANGUAGE_NAMES[langCode] || 'English';
+    const technicalMin = Math.ceil(0.7 * count);
     const languageRule =
       langCode !== 'en'
         ? `\nCRITICAL: Write every question entirely in ${languageName}. Use the correct script (e.g. Arabic script for Arabic). No English. Output only the questions, one per line.\n`
@@ -1863,11 +1888,13 @@ Job description (excerpt): ${(jobDescription || '').substring(0, 1500)}
 Key skills: ${(jobSkills || []).join(', ')}
 Candidate resume (excerpt): ${(candidateContext || 'Not provided').substring(0, 1500)}
 
-Generate exactly ${count} interview questions. Include a balanced mix of these four types (vary the order):
-1) **Resume-based**: Questions about the candidate's experience, projects, or skills from their CV (e.g. "Tell me about [specific project/role] on your resume", "You mentioned X — how did you apply it?").
-2) **Job/role-based**: Questions about this role and why they want it (e.g. "Why are you interested in this position?", "How do you see yourself fitting into this team?").
-3) **Technical**: Role-relevant technical questions (concepts, tools, or scenarios for ${jobTitle}).
-4) **Behavioral**: Situational or past-behavior questions (e.g. "Tell me about a time when...", "How do you handle...?").
+Generate exactly ${count} interview questions. You MUST follow ALL of these rules:
+- At least ${technicalMin} of the ${count} questions MUST be **technical** (specific tools, concepts, system design, debugging, or scenarios directly relevant to ${jobTitle}). Most of the list should be technical.
+- Exactly **one** question MUST be **CV-specific**: it must name or clearly reference a concrete project, employer, skill, or accomplishment from the candidate resume excerpt above (not generic).
+- At most **one** **behavioral** question (past behavior / "tell me about a time…" / how you handled a situation).
+- At most **one** **role/motivation** question (why this role, interest in team/company, fit—not technical).
+- Fill any remaining slots with additional **technical** questions until you have exactly ${count} lines.
+- Vary order; avoid repeating the same theme.
 
 One question per line. No numbering. No preamble — output only the questions, one per line.`;
 

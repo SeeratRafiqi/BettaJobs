@@ -93,7 +93,7 @@ export default function VoiceInterviewReport() {
               <CardTitle>Questions &amp; Answers</CardTitle>
               <CardDescription>Your responses from the voice interview</CardDescription>
             </CardHeader>
-            <CardContent className="space-y-6">
+            <CardContent className="space-y-6 max-h-[600px] overflow-y-auto">
               {report.qa.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No questions and answers recorded.</p>
               ) : (

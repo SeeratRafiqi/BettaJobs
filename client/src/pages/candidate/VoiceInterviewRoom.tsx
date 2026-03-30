@@ -5,6 +5,7 @@ import {
   getVoiceInterviewSession,
   startVoiceInterview,
   submitVoiceInterviewAnswer,
+  synthesizeVoiceInterviewTTS,
 } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -53,25 +54,61 @@ function looksLikeAIEcho(transcript: string, lastSpokenQuestion: string | null):
   return q.includes(t) || t.includes(q.slice(0, 30));
 }
 
-function speakQuestion(text: string, onEnd?: () => void, languageCode?: string) {
-  if (!text || typeof window === 'undefined' || !window.speechSynthesis) {
+let activeTTSAudio: HTMLAudioElement | null = null;
+let activeTTSObjectUrl: string | null = null;
+
+function stopVoiceInterviewTTSPlayback() {
+  if (activeTTSAudio) {
+    try {
+      activeTTSAudio.pause();
+    } catch {
+      /* ignore */
+    }
+    activeTTSAudio.src = '';
+    activeTTSAudio = null;
+  }
+  if (activeTTSObjectUrl) {
+    URL.revokeObjectURL(activeTTSObjectUrl);
+    activeTTSObjectUrl = null;
+  }
+}
+
+/** Qwen TTS via POST /api/voice-interviews/tts (auth Bearer token via api client). */
+async function speakQuestion(text: string, onEnd?: () => void, languageCode?: string) {
+  const finish = () => {
     onEnd?.();
+  };
+  if (!text || typeof window === 'undefined') {
+    finish();
     return;
   }
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.rate = 0.95;
-  utterance.pitch = 1;
-  const lang = languageCode ? (LANG_BCP47[languageCode.split('-')[0]] || languageCode) : 'en-US';
-  utterance.lang = lang;
-  const voices = window.speechSynthesis.getVoices().filter((v) => v.lang.startsWith(lang.split('-')[0]) || v.lang.startsWith('en'));
-  if (voices.length > 0) {
-    const preferred = voices.find((v) => v.lang.startsWith(lang.split('-')[0])) || voices[0];
-    utterance.voice = preferred;
+  stopVoiceInterviewTTSPlayback();
+  const lang = (languageCode || 'en').split('-')[0] || 'en';
+  let blob: Blob;
+  try {
+    blob = await synthesizeVoiceInterviewTTS(text, lang);
+  } catch {
+    finish();
+    return;
   }
-  utterance.onend = () => onEnd?.();
-  utterance.onerror = () => onEnd?.();
-  window.speechSynthesis.speak(utterance);
+  const url = URL.createObjectURL(blob);
+  activeTTSObjectUrl = url;
+  const audio = new Audio(url);
+  activeTTSAudio = audio;
+  audio.onended = () => {
+    stopVoiceInterviewTTSPlayback();
+    finish();
+  };
+  audio.onerror = () => {
+    stopVoiceInterviewTTSPlayback();
+    finish();
+  };
+  try {
+    await audio.play();
+  } catch {
+    stopVoiceInterviewTTSPlayback();
+    finish();
+  }
 }
 
 const INTERVIEW_LANGUAGES: { value: string; label: string }[] = [
@@ -117,6 +154,7 @@ function VoiceInterviewRoom() {
   const latestResponseRef = useRef('');
   const latestInterimRef = useRef('');
   const submittingRef = useRef(false);
+  const lastSpeechActivityAtRef = useRef(Date.now());
   /** When true, ignore speech results (AI is speaking). Keeps mic running so no restart needed. */
   const isAISpeakingRef = useRef(false);
   /** Ignore results until this timestamp (ms) to avoid capturing tail of TTS. */
@@ -180,16 +218,6 @@ function VoiceInterviewRoom() {
     return () => clearInterval(interval);
   }, [session?.status, session?.endsAt, sessionId, queryClient]);
 
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.speechSynthesis) return;
-    const onEnd = () => setIsAISpeaking(false);
-    window.speechSynthesis.addEventListener('end', onEnd);
-    return () => {
-      window.speechSynthesis.removeEventListener('end', onEnd);
-      window.speechSynthesis.cancel();
-    };
-  }, []);
-
   const interviewLang = (session as any)?.preferredLanguage ?? preferredLanguage;
 
   // Auto-speak when we have a new current question. After AI speaks, restart recognition so next turn captures voice (continuous call).
@@ -223,9 +251,9 @@ function VoiceInterviewRoom() {
         }
         restartRecognitionAfterTTSRef.current(lang || 'en');
         restartingAfterTTSRef.current = false;
-      }, 600);
+      }, 300);
     };
-    speakQuestion(q, onEnd, lang || 'en');
+    void speakQuestion(q, onEnd, lang || 'en');
   }, [session?.currentQuestion, session?.status, interviewLang]);
 
   // Camera (and request audio too so one prompt grants both camera + mic)
@@ -312,6 +340,8 @@ function VoiceInterviewRoom() {
       const langCode = (session as any)?.preferredLanguage ?? preferredLanguage ?? 'en';
       rec.lang = LANG_BCP47[langCode.split('-')[0]] || 'en-US';
       rec.onresult = (event: any) => {
+        if (isAISpeakingRef.current || Date.now() < ignoreResultsUntilRef.current) return;
+        lastSpeechActivityAtRef.current = Date.now();
         let finalText = '';
         let interimText = '';
         for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -482,6 +512,7 @@ function VoiceInterviewRoom() {
     };
     rec.onresult = (event: any) => {
       if (isAISpeakingRef.current || Date.now() < ignoreResultsUntilRef.current) return;
+      lastSpeechActivityAtRef.current = Date.now();
       let finalText = '';
       let interimText = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -515,9 +546,35 @@ function VoiceInterviewRoom() {
           audioStreamRef.current = null;
         }
         toast({ title: 'Microphone blocked', description: 'Turn on Mic again and choose Allow when the browser asks.', variant: 'destructive' });
+        return;
       }
+      // Recover from transient SpeechRecognition failures that can stall auto-submit after a few turns.
+      if (!isListeningRef.current || recognitionRef.current !== rec) return;
+      setTimeout(() => {
+        if (!isListeningRef.current || recognitionRef.current !== rec) return;
+        try { rec.stop(); } catch (_) {}
+        setTimeout(() => {
+          if (!isListeningRef.current || recognitionRef.current !== rec) return;
+          attachRecognitionHandlers(rec, langCode);
+          try { rec.start(); } catch (_) {}
+        }, 180);
+      }, 120);
     };
   }, [toast]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!isListeningRef.current) return;
+      if (isAISpeakingRef.current) return;
+      if (Date.now() < ignoreResultsUntilRef.current) return;
+      const hasDraft = (latestResponseRef.current + ' ' + latestInterimRef.current).trim().length > 0;
+      const idleMs = Date.now() - lastSpeechActivityAtRef.current;
+      if (hasDraft && idleMs > ANSWER_COMPLETE_PAUSE_MS + 1500 && !submittingRef.current && !submitMutation.isPending) {
+        autoSubmitRef.current();
+      }
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [submitMutation.isPending]);
 
   const startListening = useCallback(async () => {
     if (!SpeechRecognitionAPI) {
@@ -533,6 +590,7 @@ function VoiceInterviewRoom() {
     setInterimTranscript('');
     latestResponseRef.current = '';
     latestInterimRef.current = '';
+    lastSpeechActivityAtRef.current = Date.now();
     const stream = audioStreamRef.current;
     silenceCheckPhaseRef.current = 0;
     const langCode = (session as any)?.preferredLanguage ?? preferredLanguage ?? 'en';
@@ -573,7 +631,7 @@ function VoiceInterviewRoom() {
 
   // After TTS ends: restart the same recognition instance (stop then delayed start) so the mic keeps working every turn — like a real call.
   // Reusing one instance avoids browser issues from creating many recognition objects.
-  const RESTART_RECOGNITION_DELAY_MS = 500;
+  const RESTART_RECOGNITION_DELAY_MS = 300;
   useEffect(() => {
     restartRecognitionAfterTTSRef.current = (langCode: string) => {
       if (!isListeningRef.current) return;
@@ -621,12 +679,12 @@ function VoiceInterviewRoom() {
     lastSpokenQuestionRef.current = q;
     setIsAISpeaking(true);
     const lang = (session as any)?.preferredLanguage ?? preferredLanguage;
-    speakQuestion(q, () => setIsAISpeaking(false), lang || 'en');
+    void speakQuestion(q, () => setIsAISpeaking(false), lang || 'en');
   }, [session?.currentQuestion, session, preferredLanguage]);
 
   const handleEndInterview = useCallback(() => {
     stopListening();
-    if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
+    stopVoiceInterviewTTSPlayback();
     setLocation('/candidate/interviews');
   }, [stopListening, setLocation]);
 
@@ -813,7 +871,7 @@ function VoiceInterviewRoom() {
   };
 
   return (
-    <div className="fixed inset-0 bg-gray-900 overflow-hidden flex flex-col">
+    <div className="min-h-screen bg-gray-900 overflow-y-auto flex flex-col">
       {interviewEnded && (
         <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-amber-900/90 text-amber-100 px-4 py-2 rounded-lg text-sm font-medium">
           Time&apos;s up. Interview closed. You can no longer submit answers.

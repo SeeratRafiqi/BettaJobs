@@ -61,23 +61,29 @@ export async function synthesizeSpeech(
     model: 'qwen3-tts-flash',
     input: {
       text: (text || '').trim().slice(0, 2000),
-      voice: 'Cherry',
+      voice: 'loongstella',
       language_type: languageType,
+    },
+    parameters: {
+      speed: 1.2,
     },
   };
 
-  try {
-    const response = await axios.post<{
+  const post = (b: typeof body) =>
+    axios.post<{
       output?: { audio?: { url?: string; data?: string } };
       code?: string;
       message?: string;
-    }>(DASHSCOPE_TTS_URL, body, {
+    }>(DASHSCOPE_TTS_URL, b, {
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
       timeout: 30000,
     });
+
+  try {
+    const response = await post(body);
 
     const audio = response.data?.output?.audio;
     if (!audio) {
@@ -98,7 +104,38 @@ export async function synthesizeSpeech(
 
     return null;
   } catch (err: any) {
-    console.error('[AlibabaSpeech] TTS error:', err?.response?.data || err?.message);
+    const data = err?.response?.data;
+    const msg = String(data?.message || err?.message || '');
+    const code = String(data?.code || '');
+
+    // If requested voice is not licensed/available, retry with a known-working fallback voice.
+    if (code === 'InvalidParameter' && /invalid voice/i.test(msg)) {
+      try {
+        console.warn('[AlibabaSpeech] Voice not available; retrying with fallback voice.');
+        const retry = {
+          ...body,
+          input: { ...body.input, voice: 'Cherry' },
+        };
+        const retryRes = await post(retry);
+        const audio = retryRes.data?.output?.audio;
+        if (!audio) return null;
+        if (audio.data) {
+          const buffer = Buffer.from(audio.data, 'base64');
+          return { audioBuffer: buffer, mimeType: 'audio/wav' };
+        }
+        if (audio.url) {
+          const audioRes = await axios.get(audio.url, { responseType: 'arraybuffer', timeout: 15000 });
+          const buffer = Buffer.from(audioRes.data);
+          return { audioBuffer: buffer, mimeType: 'audio/wav' };
+        }
+        return null;
+      } catch (retryErr: any) {
+        console.error('[AlibabaSpeech] TTS retry error:', retryErr?.response?.data || retryErr?.message);
+        return null;
+      }
+    }
+
+    console.error('[AlibabaSpeech] TTS error:', data || err?.message);
     return null;
   }
 }
