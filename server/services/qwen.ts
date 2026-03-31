@@ -1876,25 +1876,25 @@ Return ONLY valid JSON:
     const { jobTitle, jobDescription, jobSkills, candidateContext, count = 5, preferredLanguage } = params;
     const langCode = (preferredLanguage || 'en').split('-')[0];
     const languageName = QwenService.LANGUAGE_NAMES[langCode] || 'English';
-    const technicalMin = Math.ceil(0.7 * count);
     const languageRule =
       langCode !== 'en'
         ? `\nCRITICAL: Write every question entirely in ${languageName}. Use the correct script (e.g. Arabic script for Arabic). No English. Output only the questions, one per line.\n`
         : '';
+    const skillsList = (jobSkills || []).filter(Boolean).join(', ') || '(none listed — derive from the job description only)';
     const prompt = `You are preparing interview questions for a job interview.${languageRule}
 
 Job title: ${jobTitle}
-Job description (excerpt): ${(jobDescription || '').substring(0, 1500)}
-Key skills: ${(jobSkills || []).join(', ')}
+Job description (ground truth for the role): ${(jobDescription || '').substring(0, 2000)}
+Must-have / key skills to cover (name specific tools, methods, or domains from this list when relevant): ${skillsList}
 Candidate resume (excerpt): ${(candidateContext || 'Not provided').substring(0, 1500)}
 
 Generate exactly ${count} interview questions. You MUST follow ALL of these rules:
-- At least ${technicalMin} of the ${count} questions MUST be **technical** (specific tools, concepts, system design, debugging, or scenarios directly relevant to ${jobTitle}). Most of the list should be technical.
-- Exactly **one** question MUST be **CV-specific**: it must name or clearly reference a concrete project, employer, skill, or accomplishment from the candidate resume excerpt above (not generic).
-- At most **one** **behavioral** question (past behavior / "tell me about a time…" / how you handled a situation).
-- At most **one** **role/motivation** question (why this role, interest in team/company, fit—not technical).
-- Fill any remaining slots with additional **technical** questions until you have exactly ${count} lines.
-- Vary order; avoid repeating the same theme.
+- **Every** question must be **technical**: it must probe knowledge, design, implementation, debugging, trade-offs, performance, reliability, security, data integrity, validation, operations, or tooling—not icebreakers, motivation, culture fit, or generic "tell me about a time" behavioral unless the scenario is explicitly a **technical** incident (e.g. outage, bug hunt) **in the stack or domain of this job description**.
+- **Every** question MUST be **anchored to this role**: tie each question to something **explicit or clearly implied** in the **job description** (responsibilities, scope, deliverables, environment, constraints, metrics, compliance) **and/or** to a **specific skill, tool, method, or requirement** from the **key skills** line or JD requirements. The candidate should recognize it as about **this** role; avoid questions that would read the same for an unrelated job title.
+- **No generic trivia** that does not reference this JD/skills context (e.g. do not ask abstract puzzles unrelated to the posting).
+- **Difficulty**: challenging but fair; prefer trade-offs, failure modes, scaling/reliability, debugging under constraints, or how you would validate or measure a solution—avoid textbook-only definitions with no link to the role's work.
+- **Optional**: at most **one** question may mention the **resume excerpt**, and only as a **technical** follow-on (e.g. how they applied a JD-relevant tool or pattern on a named project)—never a biography or strengths/weaknesses question.
+- Vary themes (architecture vs implementation vs quality vs performance, etc.); do not repeat the same narrow topic.
 
 One question per line. No numbering. No preamble — output only the questions, one per line.`;
 

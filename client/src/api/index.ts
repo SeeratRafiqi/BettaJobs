@@ -572,7 +572,7 @@ export async function submitVoiceInterviewAnswer(
 
 export async function assignVoiceInterview(
   applicationId: string,
-  options?: { durationMinutes?: number }
+  options?: { durationMinutes?: number; interviewQuestionCount?: number }
 ): Promise<{
   message: string;
   session: {
@@ -596,7 +596,11 @@ export async function assignVoiceInterview(
       allocatedInterviewQuestions?: number;
       expiresAt: string;
     };
-  }>('/voice-interviews/assign', { applicationId, durationMinutes: options?.durationMinutes });
+  }>('/voice-interviews/assign', {
+    applicationId,
+    durationMinutes: options?.durationMinutes,
+    interviewQuestionCount: options?.interviewQuestionCount,
+  });
 }
 
 /** Whether Alibaba TTS is available (same key as Qwen). */

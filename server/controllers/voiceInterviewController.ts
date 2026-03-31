@@ -408,7 +408,7 @@ export const voiceInterviewController = {
     try {
       await ensureDurationMinutesColumn();
       await ensureConductorStateColumn();
-      const { applicationId, durationMinutes } = req.body || {};
+      const { applicationId, durationMinutes, interviewQuestionCount } = req.body || {};
       if (!applicationId) return res.status(400).json({ message: 'applicationId is required' });
       const duration = durationMinutes != null ? Math.min(60, Math.max(5, Number(durationMinutes))) : 10;
 
@@ -435,7 +435,21 @@ export const voiceInterviewController = {
         return res.status(409).json({ message: 'A voice interview is already assigned for this application.' });
       }
 
-      const maxTurns = maxTurnsFromDuration(duration);
+      /** Recruiter-chosen number of technical/script questions (optional). Intro turns are added server-side. */
+      let maxTurns: number;
+      if (interviewQuestionCount != null && interviewQuestionCount !== '') {
+        const n = Number(interviewQuestionCount);
+        if (!Number.isFinite(n)) {
+          return res.status(400).json({ message: 'interviewQuestionCount must be a number' });
+        }
+        const q = Math.min(
+          MAX_INTERVIEW_QUESTIONS,
+          Math.max(MIN_INTERVIEW_QUESTIONS, Math.floor(n))
+        );
+        maxTurns = INTRO_TURNS + q;
+      } else {
+        maxTurns = maxTurnsFromDuration(duration);
+      }
       const expiresAt = new Date(Date.now() + VOICE_INTERVIEW_EXPIRY_HOURS * 60 * 60 * 1000);
       const session = await VoiceInterviewSession.create({
         id: randomUUID(),

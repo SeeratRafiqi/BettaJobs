@@ -183,10 +183,18 @@ export function AppLayout({ children }: AppLayoutProps) {
     '--sidebar-width-icon': '3rem',
   } as React.CSSProperties;
 
-  const isVoiceInterviewPage =
-    location.startsWith('/candidate/voice-interviews') || location === '/candidate/test-voice-interview';
-  if (isVoiceInterviewPage) {
+  const isVoiceInterviewReport =
+    location.startsWith('/candidate/voice-interviews/') && location.endsWith('/report');
+  const isVoiceInterviewRoom =
+    (location.startsWith('/candidate/voice-interviews') && !isVoiceInterviewReport) ||
+    location === '/candidate/test-voice-interview';
+  if (isVoiceInterviewRoom) {
     return <div className="h-screen w-full overflow-hidden">{children}</div>;
+  }
+  if (isVoiceInterviewReport) {
+    return (
+      <div className="h-screen w-full overflow-y-auto overflow-x-hidden">{children}</div>
+    );
   }
 
   return (

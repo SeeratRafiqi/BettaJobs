@@ -21,32 +21,37 @@ export default function VoiceInterviewReport() {
 
   if (isLoading || !sessionId) {
     return (
-      <div className="container max-w-3xl py-6 space-y-4">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-64 w-full" />
+      <div className="min-h-screen w-full">
+        <div className="mx-auto w-full max-w-3xl px-4 py-6 space-y-4">
+          <Skeleton className="h-8 w-48 mx-auto" />
+          <Skeleton className="h-64 w-full" />
+        </div>
       </div>
     );
   }
 
   if (!report) {
     return (
-      <div className="container max-w-3xl py-6">
-        <Card>
-          <CardContent className="py-8 text-center">
-            <p className="text-muted-foreground">Report not found.</p>
-            <Link href="/candidate/interviews">
-              <Button variant="ghost" className="mt-2">Back to Interviews</Button>
-            </Link>
-          </CardContent>
-        </Card>
+      <div className="min-h-screen w-full">
+        <div className="mx-auto w-full max-w-3xl px-4 py-6">
+            <Card>
+              <CardContent className="py-8 text-center">
+                <p className="text-muted-foreground">Report not found.</p>
+                <Link href="/candidate/interviews">
+                  <Button variant="ghost" className="mt-2">
+                    Back to Interviews
+                  </Button>
+                </Link>
+              </CardContent>
+            </Card>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen flex flex-col">
-      <div className="flex-1 overflow-y-auto">
-        <div className="container max-w-3xl py-6 space-y-6 pb-12">
+    <div className="min-h-screen w-full">
+      <div className="mx-auto w-full max-w-3xl px-4 py-6 pb-16 space-y-6">
           <div className="flex items-center gap-3">
             <Link href="/candidate/interviews">
               <Button variant="ghost" size="icon">
@@ -66,15 +71,13 @@ export default function VoiceInterviewReport() {
             <CardHeader>
               <CardTitle>Summary</CardTitle>
               <CardDescription>
-                {report.completedAt
-                  ? `Completed ${formatDateTime(report.completedAt)}`
-                  : 'Interview session'}
+                {report.completedAt ? `Completed ${formatDateTime(report.completedAt)}` : 'Interview session'}
               </CardDescription>
             </CardHeader>
             <CardContent>
               {report.outcome ? (
                 <div
-                  className="rounded-lg border bg-muted/30 p-4 text-sm whitespace-pre-wrap max-h-[420px] overflow-y-auto"
+                  className="rounded-lg border bg-muted/30 p-4 text-sm whitespace-pre-wrap"
                   role="region"
                   aria-label="Interview summary"
                 >
@@ -82,7 +85,8 @@ export default function VoiceInterviewReport() {
                 </div>
               ) : (
                 <p className="text-sm text-muted-foreground py-2">
-                  No summary available yet. Your answers are listed below. The summary may appear after the interview is processed.
+                  No summary available yet. Your answers are listed below. The summary may appear after the interview is
+                  processed.
                 </p>
               )}
             </CardContent>
@@ -101,7 +105,7 @@ export default function VoiceInterviewReport() {
                 )}
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-6 max-h-[600px] overflow-y-auto">
+            <CardContent className="space-y-6">
               {report.qa.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No questions and answers recorded.</p>
               ) : (
@@ -116,13 +120,14 @@ export default function VoiceInterviewReport() {
             </CardContent>
           </Card>
 
-          <Link href="/candidate/interviews">
-            <Button variant="outline" className="gap-2">
-              <ArrowLeft className="w-4 h-4" />
-              Back to Interviews
-            </Button>
-          </Link>
-        </div>
+          <div className="flex justify-center">
+            <Link href="/candidate/interviews">
+              <Button variant="outline" className="gap-2">
+                <ArrowLeft className="w-4 h-4" />
+                Back to Interviews
+              </Button>
+            </Link>
+          </div>
       </div>
     </div>
   );

@@ -71,6 +71,8 @@ export default function Pipeline() {
   const [assessmentDialogApp, setAssessmentDialogApp] = useState<PipelineApplication | null>(null);
   const [selectedAssessmentId, setSelectedAssessmentId] = useState<string | null>(null);
   const [voiceInterviewDuration, setVoiceInterviewDuration] = useState<number>(10);
+  /** Technical/script question count chosen by recruiter (server adds intro turns). */
+  const [voiceInterviewQuestionCount, setVoiceInterviewQuestionCount] = useState<number>(5);
 
   const { data: pipeline, isLoading } = useQuery({
     queryKey: ['job-pipeline', jobId],
@@ -140,8 +142,15 @@ export default function Pipeline() {
   });
 
   const assignVoiceInterviewMutation = useMutation({
-    mutationFn: ({ applicationId, durationMinutes }: { applicationId: string; durationMinutes?: number }) =>
-      assignVoiceInterview(applicationId, { durationMinutes }),
+    mutationFn: ({
+      applicationId,
+      durationMinutes,
+      interviewQuestionCount,
+    }: {
+      applicationId: string;
+      durationMinutes?: number;
+      interviewQuestionCount?: number;
+    }) => assignVoiceInterview(applicationId, { durationMinutes, interviewQuestionCount }),
     onSuccess: (res, { applicationId }) => {
       queryClient.invalidateQueries({ queryKey: ['voice-interview-report-app', applicationId] });
       const n = res.session.allocatedInterviewQuestions;
@@ -612,10 +621,22 @@ export default function Pipeline() {
                     Voice interview
                   </p>
                   <p className="text-xs text-muted-foreground mb-2">
-                    Assign a voice interview for this application. The candidate will see it under <strong>Interviews → Voice Interviews</strong>. Question count follows duration (see toast after assign). Intro turns are separate from the allocated technical questions. AI generates questions (Alibaba/Qwen).
+                    Assign a voice interview for this application. The candidate will see it under <strong>Interviews → Voice Interviews</strong>. You choose how many <strong>technical</strong> questions the AI asks; duration sets the session time limit. Intro turns are separate. Questions are generated from the job description and skills (Alibaba/Qwen).
                   </p>
                   <div className="flex flex-wrap items-center gap-2 mb-2">
-                    <label className="text-xs text-muted-foreground">Duration:</label>
+                    <label className="text-xs text-muted-foreground">Technical questions:</label>
+                    <select
+                      value={voiceInterviewQuestionCount}
+                      onChange={(e) => setVoiceInterviewQuestionCount(Number(e.target.value))}
+                      className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+                    >
+                      {[3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((n) => (
+                        <option key={n} value={n}>
+                          {n}
+                        </option>
+                      ))}
+                    </select>
+                    <label className="text-xs text-muted-foreground">Session duration:</label>
                     <select
                       value={voiceInterviewDuration}
                       onChange={(e) => setVoiceInterviewDuration(Number(e.target.value))}
@@ -631,7 +652,14 @@ export default function Pipeline() {
                       variant="outline"
                       size="sm"
                       className="gap-2"
-                      onClick={() => assessmentDialogApp && assignVoiceInterviewMutation.mutate({ applicationId: assessmentDialogApp.id, durationMinutes: voiceInterviewDuration })}
+                      onClick={() =>
+                        assessmentDialogApp &&
+                        assignVoiceInterviewMutation.mutate({
+                          applicationId: assessmentDialogApp.id,
+                          durationMinutes: voiceInterviewDuration,
+                          interviewQuestionCount: voiceInterviewQuestionCount,
+                        })
+                      }
                       disabled={assignVoiceInterviewMutation.isPending}
                     >
                       {assignVoiceInterviewMutation.isPending ? (
