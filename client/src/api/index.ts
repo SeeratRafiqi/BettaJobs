@@ -575,11 +575,27 @@ export async function assignVoiceInterview(
   options?: { durationMinutes?: number }
 ): Promise<{
   message: string;
-  session: { id: string; applicationId: string; jobId: string; status: string; maxQuestions: number; expiresAt: string };
+  session: {
+    id: string;
+    applicationId: string;
+    jobId: string;
+    status: string;
+    maxQuestions: number;
+    allocatedInterviewQuestions?: number;
+    expiresAt: string;
+  };
 }> {
   return apiPost<{
     message: string;
-    session: { id: string; applicationId: string; jobId: string; status: string; maxQuestions: number; expiresAt: string };
+    session: {
+      id: string;
+      applicationId: string;
+      jobId: string;
+      status: string;
+      maxQuestions: number;
+      allocatedInterviewQuestions?: number;
+      expiresAt: string;
+    };
   }>('/voice-interviews/assign', { applicationId, durationMinutes: options?.durationMinutes });
 }
 

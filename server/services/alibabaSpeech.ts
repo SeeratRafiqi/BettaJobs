@@ -57,15 +57,21 @@ export async function synthesizeSpeech(
   }
 
   const languageType = getLanguageType(languageCode);
+  // Short lines (greetings, acknowledgements) often sound stretched at a single global speed; nudge faster for brief text only.
+  const rawText = (text || '').trim().slice(0, 2000);
+  const normalizedText = rawText.replace(/\s+/g, ' ').replace(/\.{4,}/g, '...');
+  const speed =
+    normalizedText.length <= 90 ? 1.35 : normalizedText.length <= 220 ? 1.22 : 1.15;
+
   const body = {
     model: 'qwen3-tts-flash',
     input: {
-      text: (text || '').trim().slice(0, 2000),
+      text: normalizedText,
       voice: 'loongstella',
       language_type: languageType,
     },
     parameters: {
-      speed: 1.2,
+      speed,
     },
   };
 

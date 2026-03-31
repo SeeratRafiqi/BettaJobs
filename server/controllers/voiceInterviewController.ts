@@ -19,6 +19,8 @@ import { logUsage, logUsageFailure, inferErrorType } from '../services/usageServ
 const VOICE_INTERVIEW_EXPIRY_HOURS = 72;
 /** Once started, candidate must complete within this many minutes. */
 const VOICE_INTERVIEW_DURATION_MINUTES = 10;
+/** Number of "turns" for intro (greeting, small talk, context, ready check). Used before script questions. */
+const INTRO_TURNS = 4;
 
 /** Build Q&A list from conductor conversationHistory when session.questions/answers are empty. Pairs assistant message → next user message as one Q&A. */
 function buildQaFromConversationHistory(conductorStateRaw: string | null | undefined): { question: string; answer: string; answeredAt: string | null }[] {
@@ -44,6 +46,108 @@ function buildQaFromConversationHistory(conductorStateRaw: string | null | undef
     }
   }
   return out;
+}
+
+/** Same substantive filters as filterToInterviewQa, for paired Q&A from conductor conversationHistory (correct turn order). */
+function filterInterviewQaPairsFromConductorState(conductorStateRaw: string | null | undefined): { questionTexts: string[]; answerTexts: string[] } {
+  const pairs = buildQaFromConversationHistory(conductorStateRaw);
+  const questionTexts: string[] = [];
+  const answerTexts: string[] = [];
+  const smallTalkPattern = /^(no worries|take your time|how are you|hi\b|hello\b|thanks|thank you|great to have you|glad you could|sure\b|ok\b|okay\b|sounds good|let'?s begin|let'?s start|are you ready|any questions before we begin|perfect\b|alright\b)/i;
+  for (const p of pairs) {
+    const q = (p.question || '').trim();
+    const a = (p.answer || '').trim();
+    if (q.length < 10) continue;
+    if (smallTalkPattern.test(q)) continue;
+    questionTexts.push(q);
+    answerTexts.push(a);
+  }
+  return { questionTexts, answerTexts };
+}
+
+/** Script questions from conductor state (recruiter-allocated technical count). */
+function parseConductorScriptQuestions(conductorStateRaw: string | null | undefined): string[] {
+  if (!conductorStateRaw || typeof conductorStateRaw !== 'string') return [];
+  try {
+    const state = JSON.parse(conductorStateRaw) as { questions?: unknown };
+    if (!Array.isArray(state.questions)) return [];
+    return state.questions.map((s) => String(s ?? '').trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Summary/outcome only: pair each recruiter-allocated script line (index i) with the stored answer for questionIndex i.
+ * Ignores intro/small-talk in history; transcript should still use buildQaFromConversationHistory.
+ */
+function buildTechnicalQaForSummary(
+  conductorStateRaw: string | null | undefined,
+  answersData: string | { questionIndex: number; answerText: string }[] | null | undefined
+): { questionTexts: string[]; answerTexts: string[] } {
+  const script = parseConductorScriptQuestions(conductorStateRaw);
+  if (script.length === 0) return { questionTexts: [], answerTexts: [] };
+
+  let answers: { questionIndex: number; answerText: string }[] = [];
+  if (Array.isArray(answersData)) {
+    answers = answersData;
+  } else if (typeof answersData === 'string') {
+    try {
+      answers = JSON.parse(answersData || '[]');
+    } catch {
+      return { questionTexts: [], answerTexts: [] };
+    }
+  } else {
+    return { questionTexts: [], answerTexts: [] };
+  }
+
+  const byIndex = new Map<number, string>();
+  for (const a of answers) {
+    if (a && typeof a.questionIndex === 'number') {
+      byIndex.set(a.questionIndex, String(a.answerText ?? '').trim());
+    }
+  }
+
+  const questionTexts: string[] = [];
+  const answerTexts: string[] = [];
+  for (let i = 0; i < script.length; i++) {
+    questionTexts.push(script[i]);
+    answerTexts.push(byIndex.get(i) ?? '');
+  }
+  return { questionTexts, answerTexts };
+}
+
+/** Number of technical questions allocated for this session (script length), or derived from max_questions − intro turns. */
+function allocatedInterviewQuestionCount(session: { conductor_state?: string | null; max_questions?: number | null }): number {
+  const scriptLen = parseConductorScriptQuestions(session.conductor_state ?? undefined).length;
+  if (scriptLen > 0) return scriptLen;
+  const max = session.max_questions ?? 0;
+  return Math.max(0, max - INTRO_TURNS);
+}
+
+/** Inputs for generateVoiceInterviewOutcome: prefer script+indexed answers; fall back if conductor data missing. */
+function getSummaryQuestionAnswerTexts(
+  conductorStateRaw: string | null | undefined,
+  answersData: string | { questionIndex: number; answerText: string }[],
+  questions: { question: string; order: number }[],
+  qaTranscriptFallback: { question: string; answer: string }[]
+): { questionTexts: string[]; answerTexts: string[] } {
+  const technical = buildTechnicalQaForSummary(conductorStateRaw, answersData);
+  if (technical.questionTexts.length > 0) return technical;
+
+  const fromHist = conductorStateRaw ? filterInterviewQaPairsFromConductorState(conductorStateRaw) : { questionTexts: [] as string[], answerTexts: [] as string[] };
+  if (fromHist.questionTexts.length > 0) return fromHist;
+
+  const legacy = filterToInterviewQa(
+    questions,
+    Array.isArray(answersData) ? (answersData as { questionIndex: number; answerText: string; answeredAt: string }[]) : []
+  );
+  if (legacy.questionTexts.length > 0) return legacy;
+
+  return {
+    questionTexts: qaTranscriptFallback.map((x) => (x.question || '').trim()).filter(Boolean),
+    answerTexts: qaTranscriptFallback.map((x) => (x.answer || '').trim()),
+  };
 }
 
 /** Filter to only substantive interview Q&A; exclude greeting and small talk. Keeps questions with length >= 10 so summary can be generated from real Q&A. */
@@ -259,8 +363,6 @@ async function ensureConductorStateColumn(): Promise<void> {
   conductorStateColumnEnsured = true;
 }
 
-/** Number of "turns" for intro (greeting, small talk, context, ready check). */
-const INTRO_TURNS = 4;
 /** Approximate minutes per Q&A (candidate answer + AI reply + thinking). */
 const MINUTES_PER_QUESTION = 2;
 /** Min/max interview questions (excluding intro). */
@@ -373,6 +475,8 @@ export const voiceInterviewController = {
           jobId: session.job_id,
           status: session.status,
           maxQuestions: session.max_questions,
+          /** Role/technical questions (excludes intro turns). Same as `maxQuestions - INTRO_TURNS` at assign time. */
+          allocatedInterviewQuestions: Math.max(0, maxTurns - INTRO_TURNS),
           expiresAt: session.expires_at,
         },
       });
@@ -656,30 +760,36 @@ export const voiceInterviewController = {
         answers = JSON.parse(session.answers || '[]');
       } catch {}
 
-      let qa: { question: string; answer: string; answeredAt: string | null }[] =
-        answers.length > 0
-          ? answers.map((a) => ({
-              question: (questions[a.questionIndex]?.question ?? '').trim() || `Question ${a.questionIndex + 1}`,
-              answer: a.answerText ?? '',
-              answeredAt: a.answeredAt ?? null,
-            }))
-          : questions.map((q, i) => ({
-              question: q.question,
-              answer: answers[i]?.answerText ?? '',
-              answeredAt: answers[i]?.answeredAt ?? null,
-            }));
-
-      const noStoredQa = qa.length === 0 || qa.every((x) => !(x.answer || '').trim());
-      if (noStoredQa && session.conductor_state) {
+      let qa: { question: string; answer: string; answeredAt: string | null }[] = [];
+      if (session.conductor_state) {
         const fromHistory = buildQaFromConversationHistory(session.conductor_state);
         if (fromHistory.length > 0) qa = fromHistory;
+      }
+      if (qa.length === 0) {
+        qa =
+          answers.length > 0
+            ? answers.map((a) => ({
+                question: (questions[a.questionIndex]?.question ?? '').trim() || `Question ${a.questionIndex + 1}`,
+                answer: a.answerText ?? '',
+                answeredAt: a.answeredAt ?? null,
+              }))
+            : questions.map((q, i) => ({
+                question: q.question,
+                answer: answers[i]?.answerText ?? '',
+                answeredAt: answers[i]?.answeredAt ?? null,
+              }));
       }
 
       let candidateOutcome = (session as any).candidate_outcome ?? null;
       let recruiterOutcome = session.outcome ?? null;
-      const questionTextsForSummary = qa.map((x) => (x.question || '').trim()).filter(Boolean);
-      const answerTextsForSummary = qa.map((x) => (x.answer || '').trim());
-      const hasAnyContent = questionTextsForSummary.length > 0 || answerTextsForSummary.some((a) => a.length > 0);
+      const { questionTexts: questionTextsForSummary, answerTexts: answerTextsForSummary } = getSummaryQuestionAnswerTexts(
+        session.conductor_state ?? undefined,
+        answers,
+        questions,
+        qa
+      );
+      const hasAnyContent =
+        questionTextsForSummary.length > 0 || answerTextsForSummary.some((a) => a.trim().length > 0);
 
       if (session.status === 'completed' && hasAnyContent && ((!candidateOutcome || !String(candidateOutcome).trim()) || (!recruiterOutcome || !String(recruiterOutcome).trim()))) {
         try {
@@ -719,6 +829,8 @@ export const voiceInterviewController = {
           completedAt: session.completed_at,
           outcome: candidateOutcome ?? (session as any).candidate_outcome ?? '',
           qa,
+          allocatedInterviewQuestions: allocatedInterviewQuestionCount(session),
+          maxInterviewTurns: session.max_questions ?? null,
         },
       });
     } catch (e: any) {
@@ -1010,7 +1122,12 @@ export const voiceInterviewController = {
             let candidateOutcome: string | null = null;
             try {
               await ensureCandidateOutcomeColumn();
-              const { questionTexts, answerTexts } = filterToInterviewQa(questions, answers);
+              const { questionTexts, answerTexts } = getSummaryQuestionAnswerTexts(
+                JSON.stringify(updatedState),
+                answers,
+                questions,
+                buildQaFromConversationHistory(JSON.stringify(updatedState))
+              );
               if (questionTexts.length > 0) {
                 const outcomeResult = await qwenService.generateVoiceInterviewOutcome({
                   jobTitle,
@@ -1202,29 +1319,35 @@ export const voiceInterviewController = {
         answers = JSON.parse(session.answers || '[]');
       } catch {}
 
-      let qa: { question: string; answer: string; answeredAt: string | null }[] =
-        answers.length > 0
-          ? answers.map((a) => ({
-              question: (questions[a.questionIndex]?.question ?? '').trim() || `Question ${a.questionIndex + 1}`,
-              answer: a.answerText ?? '',
-              answeredAt: a.answeredAt ?? null,
-            }))
-          : questions.map((q, i) => ({
-              question: q.question,
-              answer: answers[i]?.answerText ?? '',
-              answeredAt: answers[i]?.answeredAt ?? null,
-            }));
-
-      const noStoredQa = qa.length === 0 || qa.every((x) => !(x.answer || '').trim());
-      if (noStoredQa && session.conductor_state) {
+      let qa: { question: string; answer: string; answeredAt: string | null }[] = [];
+      if (session.conductor_state) {
         const fromHistory = buildQaFromConversationHistory(session.conductor_state);
         if (fromHistory.length > 0) qa = fromHistory;
       }
+      if (qa.length === 0) {
+        qa =
+          answers.length > 0
+            ? answers.map((a) => ({
+                question: (questions[a.questionIndex]?.question ?? '').trim() || `Question ${a.questionIndex + 1}`,
+                answer: a.answerText ?? '',
+                answeredAt: a.answeredAt ?? null,
+              }))
+            : questions.map((q, i) => ({
+                question: q.question,
+                answer: answers[i]?.answerText ?? '',
+                answeredAt: answers[i]?.answeredAt ?? null,
+              }));
+      }
 
       let outcome = session.outcome ?? null;
-      const questionTextsForSummary = qa.map((x) => (x.question || '').trim()).filter(Boolean);
-      const answerTextsForSummary = qa.map((x) => (x.answer || '').trim());
-      const hasAnyContent = questionTextsForSummary.length > 0 || answerTextsForSummary.some((a) => a.length > 0);
+      const { questionTexts: questionTextsForSummary, answerTexts: answerTextsForSummary } = getSummaryQuestionAnswerTexts(
+        session.conductor_state ?? undefined,
+        answers,
+        questions,
+        qa
+      );
+      const hasAnyContent =
+        questionTextsForSummary.length > 0 || answerTextsForSummary.some((a) => a.trim().length > 0);
 
       if (session.status === 'completed' && (!outcome || !String(outcome).trim()) && hasAnyContent) {
         try {
@@ -1265,6 +1388,8 @@ export const voiceInterviewController = {
           completedAt: session.completed_at,
           outcome: outcome ?? '',
           qa,
+          allocatedInterviewQuestions: allocatedInterviewQuestionCount(session),
+          maxInterviewTurns: session.max_questions ?? null,
         },
       });
     } catch (e: any) {

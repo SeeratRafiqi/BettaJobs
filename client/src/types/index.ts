@@ -354,6 +354,10 @@ export interface VoiceInterviewReport {
   completedAt: string | null;
   outcome: string | null;
   qa: { question: string; answer: string; answeredAt: string | null }[];
+  /** Recruiter-allocated technical/script question count (excludes intro turns). */
+  allocatedInterviewQuestions?: number | null;
+  /** Total session turns cap (intro + technical), same as max_questions. */
+  maxInterviewTurns?: number | null;
 }
 
 export interface BrowseJobsResponse {

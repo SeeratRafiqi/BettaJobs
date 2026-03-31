@@ -91,7 +91,15 @@ export default function VoiceInterviewReport() {
           <Card>
             <CardHeader>
               <CardTitle>Questions &amp; Answers</CardTitle>
-              <CardDescription>Your responses from the voice interview</CardDescription>
+              <CardDescription>
+                Full conversation transcript (intro and follow-ups included).
+                {typeof report.allocatedInterviewQuestions === 'number' && (
+                  <span className="block mt-1">
+                    This session included {report.allocatedInterviewQuestions} allocated role question
+                    {report.allocatedInterviewQuestions === 1 ? '' : 's'}; summaries focus on those.
+                  </span>
+                )}
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6 max-h-[600px] overflow-y-auto">
               {report.qa.length === 0 ? (
