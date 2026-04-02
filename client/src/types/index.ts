@@ -698,13 +698,15 @@ export interface TailorCvReorderedResult {
   keyChanges: string[];
 }
 
+export type { TailoredStructuredResume } from '@shared/tailoredResumeHtml';
+
 /** Result of tailor-resume-for-job: suggestions applied + reordered for job. */
 export interface TailorResumeForJobResult {
   tailoredCvText: string;
   keyChanges: string[];
   jobTitle: string;
-  /** Structured resume for template-based PDF and preview (if extraction succeeded). */
-  structuredResume?: StructuredResume | null;
+  /** Structured resume for template-based PDF and preview (only when JSON parse succeeds). */
+  structuredResume?: import('@shared/tailoredResumeHtml').TailoredStructuredResume | null;
 }
 
 /** Structured resume for template rendering (header, sections, bullets). */
@@ -719,7 +721,6 @@ export interface StructuredResume {
   experience: { role: string; company: string; dates?: string; bullets: string[] }[];
   education: { degree: string; institution: string; dates?: string }[];
   projects: { name: string; description?: string; bullets?: string[] }[];
-  /** Awards, honours, achievements (e.g. "Employee of the Month", "Dean's List"). */
   achievements?: string[];
   certifications: string[];
 }

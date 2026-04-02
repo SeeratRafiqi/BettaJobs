@@ -1,3 +1,5 @@
+import './loadEnv.js';
+
 // Polyfill crypto.hash for Node 18 (required by Vite 7)
 import crypto from "node:crypto";
 const createHash = crypto.createHash.bind(crypto);

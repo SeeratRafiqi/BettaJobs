@@ -1,10 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { reviewCv, getRecommendedJobs, getCandidateProfile, getJobPublic, tailorResumeForJob, exportTailoredResumePdf } from '@/api';
-import { htmlElementToPdfBlob } from '@/lib/pdfExport';
-import { populateResumeTemplate } from '@/lib/resumeTemplate';
+import { buildResumeHTMLTemplate, populateResumeTemplate } from '@/lib/resumeTemplate';
 import { useAuthStore } from '@/store/auth';
-import type { CvReviewResult, StructuredResume } from '@/types';
+import type { CvReviewResult, TailoredStructuredResume } from '@/types';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -29,6 +28,7 @@ import {
   Briefcase,
   MapPin,
   Download,
+  FileCode2,
 } from 'lucide-react';
 import { Link } from 'wouter';
 import { getCountryFromCode } from '@/utils/helpers';
@@ -40,11 +40,11 @@ export default function CvReview() {
   const [selectedJobId, setSelectedJobId] = useState('');
   const [result, setResult] = useState<CvReviewResult | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
+  const [htmlLoading, setHtmlLoading] = useState(false);
   const [tailoredCvText, setTailoredCvText] = useState<string | null>(null);
   const [tailorKeyChanges, setTailorKeyChanges] = useState<string[]>([]);
   const [tailorJobTitle, setTailorJobTitle] = useState('');
-  const [structuredResume, setStructuredResume] = useState<StructuredResume | null>(null);
-  const resumePreviewRef = useRef<HTMLDivElement>(null);
+  const [structuredResume, setStructuredResume] = useState<TailoredStructuredResume | null>(null);
 
   const jobIdFromUrl = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('jobId') : null;
 
@@ -164,9 +164,9 @@ export default function CvReview() {
               Tailoring your resume for: {jobForTailor.title}
             </CardTitle>
             <CardDescription>
-              We analyze the job description and your resume, then restructure your resume to better match the role:
-              reorder sections by relevance, improve bullet clarity, and highlight relevant skills. No information is
-              added—only your existing content is reorganized and refined. Your original resume is preserved.
+              We tailor your resume to the role while keeping every skill from your CV (job matches are highlighted).
+              Each job keeps a short role description plus bullets so recruiters see what you did. PDF and HTML
+              downloads use the same self-contained HTML the server turns into a PDF.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -210,9 +210,8 @@ export default function CvReview() {
                   <div className="rounded-lg border bg-white text-gray-900 shadow-sm p-4 max-h-[520px] overflow-y-auto print:shadow-none">
                     {structuredResume ? (
                       <div
-                        ref={resumePreviewRef}
                         className="resume-template-preview"
-                        style={{ minWidth: '210mm' }}
+                        style={{ width: '100%', maxWidth: '100%', minWidth: 0 }}
                         dangerouslySetInnerHTML={{
                           __html: populateResumeTemplate(structuredResume, {
                             highlightTerms: [
@@ -228,40 +227,84 @@ export default function CvReview() {
                   </div>
                   <p className="text-xs text-muted-foreground mt-1.5">
                     {structuredResume
-                      ? 'Download uses the same structured data as the preview so the PDF matches the content you see.'
+                      ? 'PDF: server renders this same HTML with Puppeteer. HTML: identical file for your own archive or print-to-PDF.'
                       : 'No structured data available; download uses server-generated PDF from your text.'}
                   </p>
                 </div>
-                <Button
-                  onClick={async () => {
-                    if (!tailoredCvText) return;
-                    setPdfLoading(true);
-                    try {
-                      let blob: Blob;
-                      if (structuredResume && resumePreviewRef.current) {
-                        blob = await htmlElementToPdfBlob(resumePreviewRef.current);
-                      } else {
-                        blob = await exportTailoredResumePdf(tailoredCvText, structuredResume ?? undefined);
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    onClick={async () => {
+                      if (!tailoredCvText) return;
+                      setPdfLoading(true);
+                      try {
+                        const blob = await exportTailoredResumePdf({
+                          tailoredCvText,
+                          structuredResume: structuredResume ?? undefined,
+                          highlightTerms: [
+                            ...(jobForTailor?.mustHaveSkills ?? []),
+                            ...(jobForTailor?.niceToHaveSkills ?? []),
+                          ],
+                        });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `tailored-resume-${tailorJobTitle.replace(/\s+/g, '-')}.pdf`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                        toast({ title: 'Download started', description: 'Your resume PDF is downloading.' });
+                      } catch (err: any) {
+                        toast({ title: 'Download failed', description: err?.message || 'Try again.', variant: 'destructive' });
+                      } finally {
+                        setPdfLoading(false);
                       }
-                      const url = URL.createObjectURL(blob);
-                      const a = document.createElement('a');
-                      a.href = url;
-                      a.download = `tailored-resume-${tailorJobTitle.replace(/\s+/g, '-')}.pdf`;
-                      a.click();
-                      URL.revokeObjectURL(url);
-                      toast({ title: 'Download started', description: 'Your resume PDF is downloading.' });
-                    } catch (err: any) {
-                      toast({ title: 'Download failed', description: err?.message || 'Try again.', variant: 'destructive' });
-                    } finally {
-                      setPdfLoading(false);
-                    }
-                  }}
-                  disabled={pdfLoading}
-                  className="gap-2"
-                >
-                  {pdfLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                  Download Resume (PDF)
-                </Button>
+                    }}
+                    disabled={pdfLoading}
+                    className="gap-2"
+                  >
+                    {pdfLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                    Download PDF
+                  </Button>
+                  {structuredResume ? (
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setHtmlLoading(true);
+                        try {
+                          const html = buildResumeHTMLTemplate(structuredResume, {
+                            highlightTerms: [
+                              ...(jobForTailor?.mustHaveSkills ?? []),
+                              ...(jobForTailor?.niceToHaveSkills ?? []),
+                            ],
+                          });
+                          const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `tailored-resume-${tailorJobTitle.replace(/\s+/g, '-')}.html`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                          toast({
+                            title: 'HTML downloaded',
+                            description: 'Same document the server uses for PDF. Open in a browser or print to PDF.',
+                          });
+                        } catch (err: any) {
+                          toast({
+                            title: 'Download failed',
+                            description: err?.message || 'Try again.',
+                            variant: 'destructive',
+                          });
+                        } finally {
+                          setHtmlLoading(false);
+                        }
+                      }}
+                      disabled={htmlLoading}
+                      className="gap-2"
+                    >
+                      {htmlLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileCode2 className="w-4 h-4" />}
+                      Download HTML
+                    </Button>
+                  ) : null}
+                </div>
               </>
             )}
           </CardContent>

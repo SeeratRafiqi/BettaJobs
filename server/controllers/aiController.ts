@@ -5,6 +5,16 @@ import { pdfParserService } from '../services/pdfParser.js';
 import { textToPdfBuffer } from '../services/pdfExport.js';
 import { buildPdfFromOriginalTemplate } from '../services/pdfTemplateExport.js';
 import { buildPdfWithProfessionalTemplate, buildPdfFromStructuredResume, type StructuredResumeData } from '../services/pdfResumeTemplate.js';
+import { renderHtmlToPdfBuffer } from '../services/htmlPdf.js';
+import {
+  buildResumeHTMLTemplate,
+  coerceTailoredStructuredForTemplate,
+  dedupeCertLikeRows,
+  normalizeParsedTailoredResume,
+  tailoredStructuredResumeToPlainText,
+  type TailoredStructuredResume,
+  type TailoredResumeCertification,
+} from '@shared/tailoredResumeHtml';
 import path from 'node:path';
 import { Candidate } from '../db/models/Candidate.js';
 import { CvFile } from '../db/models/CvFile.js';
@@ -90,6 +100,153 @@ function applyRevisedBullets(
     revised = revised.replace(re3, () => improved);
   }
   return revised;
+}
+
+function parseStructuredResume(rawResponse: string): TailoredStructuredResume | null {
+  try {
+    const cleaned = rawResponse.replace(/```json/gi, '').replace(/```/g, '').trim();
+    const parsed = JSON.parse(cleaned) as Record<string, unknown>;
+    const requiredKeys = [
+      'name',
+      'email',
+      'skills',
+      'experience',
+      'projects',
+      'education',
+      'certifications',
+      'languages',
+      'keyChanges',
+    ];
+    const missingKeys = requiredKeys.filter((key) => !(key in parsed));
+    if (missingKeys.length > 0) {
+      console.error('Structured resume missing keys:', missingKeys);
+      return null;
+    }
+    const arrayKeys = [
+      'experience',
+      'projects',
+      'education',
+      'certifications',
+      'awardsAndAchievements',
+      'languages',
+      'keyChanges',
+    ];
+    for (const key of arrayKeys) {
+      if (!Array.isArray(parsed[key])) {
+        (parsed as Record<string, unknown>)[key] = [];
+      }
+    }
+    return normalizeParsedTailoredResume(parsed);
+  } catch (e) {
+    console.error('Failed to parse structured resume JSON:', e);
+    return null;
+  }
+}
+
+function normalizeCvListLine(line: string): string {
+  return line
+    .replace(/^\s*[•·▪◦\-*]\s*/, '')
+    .replace(/^\s*\d+[\).\-\s]+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function looksLikeResumeSectionHeading(line: string): boolean {
+  const t = line.trim();
+  if (!t || t.length > 70) return false;
+  if (/^[A-Z][A-Za-z\s/&-]{2,60}:?$/.test(t) && t.split(/\s+/).length <= 6) return true;
+  if (/^[A-Z\s/&-]{3,60}:?$/.test(t)) return true;
+  return false;
+}
+
+/** Matches AWARDS & ACHIEVEMENTS, Awards and Achievements, Honors, etc. */
+const AWARDS_SECTION_HEADING =
+  /^(awards?\s*(?:&|and)\s*achievements?|awards?|achievements?|honou?rs?|accomplishments?|recognitions?)\s*:?\s*$/i;
+
+/** Comma-separated tool list (e.g. Figma, Flutter, HTML) — not an award title. */
+function lineLooksLikeTechStackCommaList(line: string): boolean {
+  const parts = line.split(',').map((p) => p.trim()).filter(Boolean);
+  if (parts.length < 4) return false;
+  return parts.every((p) => p.length > 0 && p.length < 15);
+}
+
+function extractAwardsEntriesFromCvText(cvText: string): TailoredResumeCertification[] {
+  const lines = cvText.split(/\r?\n/).map((l) => l.trim());
+  const out: TailoredResumeCertification[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!AWARDS_SECTION_HEADING.test(lines[i])) continue;
+
+    for (let j = i + 1; j < lines.length; j++) {
+      const row = lines[j];
+      if (!row) continue;
+      if (AWARDS_SECTION_HEADING.test(row)) break;
+      if (/^certifications?\s*:?\s*$/i.test(row) || /^licen[sc]es?\s*:?\s*$/i.test(row)) break;
+      if (looksLikeResumeSectionHeading(row)) break;
+
+      if (/^\s*[•·▪◦]/.test(row)) continue;
+      if (/^\s*[-–—]\s/.test(row) || /^[-–—]\s/.test(row)) continue;
+      if (/^\s*\d+[\).\-\s]+/.test(row)) continue;
+
+      const cleaned = normalizeCvListLine(row);
+      if (cleaned.length < 6) continue;
+      if (/^page\s+\d+/i.test(cleaned)) continue;
+
+      const first = cleaned.charAt(0);
+      if (first >= 'a' && first <= 'z') continue;
+
+      if (lineLooksLikeTechStackCommaList(cleaned)) continue;
+
+      out.push({ name: cleaned, issuer: '', year: '', isRelevant: true });
+    }
+    return out;
+  }
+  return out;
+}
+
+function certificationBlobForMatch(c: TailoredResumeCertification): string {
+  return [c.name, c.issuer, c.year]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function mergeAwardsFromCvFallback(
+  structured: TailoredStructuredResume,
+  cvText: string
+): TailoredStructuredResume {
+  const existingAwards = structured.awardsAndAchievements;
+  if (existingAwards && existingAwards.length > 0) {
+    return structured;
+  }
+
+  const fromCv = extractAwardsEntriesFromCvText(cvText);
+  if (!fromCv.length) return structured;
+
+  const merged: TailoredResumeCertification[] = [...(structured.awardsAndAchievements ?? [])];
+
+  for (const row of fromCv) {
+    const b = certificationBlobForMatch(row);
+    if (b.length < 12) continue;
+    let duplicate = false;
+    for (const ex of merged) {
+      const eb = certificationBlobForMatch(ex);
+      if (eb.length < 12) continue;
+      if (eb === b || (eb.length >= 28 && b.length >= 28 && (eb.includes(b) || b.includes(eb)))) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate) merged.push(row);
+  }
+
+  return {
+    ...structured,
+    awardsAndAchievements: dedupeCertLikeRows(merged),
+  };
 }
 
 export class AiController {
@@ -314,28 +471,35 @@ export class AiController {
       const cvText = await getCvTextForCandidate(candidate.id);
       const skills = [...(job.must_have_skills || []), ...(job.nice_to_have_skills || [])];
 
-      // Use only the candidate's original CV—no AI-rewritten bullets—so content is never mixed or fabricated
-      const tailorResult = await qwenService.tailorCVReordered(
+      const { content, usage: uStructured } = await qwenService.tailorResumeStructuredJson(
         cvText,
-        job.title,
         job.description || '',
+        job.title,
         skills
       );
+      let totalInput = uStructured?.input_tokens ?? 0;
+      let totalOutput = uStructured?.output_tokens ?? 0;
 
-      const tailoredCvText = (tailorResult.tailoredCvText || '').replace(/\\n/g, '\n');
-      const keyChanges = tailorResult.keyChanges || [];
-      let totalInput = (tailorResult as any)._usage?.input_tokens ?? 0;
-      let totalOutput = (tailorResult as any)._usage?.output_tokens ?? 0;
+      const parsedStructured = parseStructuredResume(content);
+      let structuredResume: TailoredStructuredResume | null = parsedStructured;
+      let tailoredCvText = '';
+      let keyChanges: string[] = [];
 
-      let structuredResume: Record<string, unknown> | null = null;
-      try {
-        const extracted = await qwenService.extractStructuredResume(tailoredCvText) as Record<string, unknown> & { _usage?: { input_tokens: number; output_tokens: number; total_tokens: number } };
-        totalInput += extracted._usage?.input_tokens ?? 0;
-        totalOutput += extracted._usage?.output_tokens ?? 0;
-        const { _usage: _u, ...rest } = extracted;
-        structuredResume = rest;
-      } catch (_) {
-        /* use raw text + fallback template when extraction fails */
+      if (parsedStructured) {
+        structuredResume = mergeAwardsFromCvFallback(parsedStructured, cvText);
+        keyChanges = structuredResume.keyChanges ?? [];
+        tailoredCvText = tailoredStructuredResumeToPlainText(structuredResume);
+      } else {
+        const tailorResult = await qwenService.tailorCVReordered(
+          cvText,
+          job.title,
+          job.description || '',
+          skills
+        );
+        tailoredCvText = (tailorResult.tailoredCvText || '').replace(/\\n/g, '\n');
+        keyChanges = tailorResult.keyChanges || [];
+        totalInput += (tailorResult as any)._usage?.input_tokens ?? 0;
+        totalOutput += (tailorResult as any)._usage?.output_tokens ?? 0;
       }
 
       const [record] = await TailoredResume.findOrCreate({
@@ -359,7 +523,7 @@ export class AiController {
         tailoredCvText,
         keyChanges,
         jobTitle: job.title,
-        structuredResume: structuredResume ?? undefined,
+        ...(structuredResume ? { structuredResume } : {}),
       });
     } catch (error: any) {
       if (req.user?.id) logUsageFailure(req.user.id, 'tailor_resume', inferErrorType(error)).catch(() => {});
@@ -386,7 +550,16 @@ export class AiController {
       let structuredResume: unknown = null;
       if (record.structured_resume) {
         try {
-          structuredResume = JSON.parse(record.structured_resume);
+          const raw = JSON.parse(record.structured_resume);
+          if (raw && typeof raw === 'object') {
+            const coerced = coerceTailoredStructuredForTemplate(raw);
+            if (coerced) {
+              const cvText = await getCvTextForCandidate(candidate.id);
+              structuredResume = mergeAwardsFromCvFallback(coerced, cvText);
+            } else {
+              structuredResume = raw;
+            }
+          }
         } catch (_) {
           /* ignore */
         }
@@ -408,23 +581,53 @@ export class AiController {
   async exportTailoredResumeWithTemplate(req: AuthRequest, res: Response) {
     try {
       const userId = req.user!.id;
-      const { tailoredCvText, useOriginalTemplate, structuredResume } = req.body || {};
-      if (!tailoredCvText || typeof tailoredCvText !== 'string') {
-        return res.status(400).json({ message: 'tailoredCvText is required' });
-      }
-
-      const trimmed = tailoredCvText.trim();
+      const { tailoredCvText, useOriginalTemplate, structuredResume, highlightTerms } = req.body || {};
+      const pdfHighlightTerms = Array.isArray(highlightTerms)
+        ? highlightTerms.map((t: unknown) => String(t)).filter(Boolean)
+        : [];
       let buffer: Buffer;
 
       if (useOriginalTemplate) {
+        if (!tailoredCvText || typeof tailoredCvText !== 'string') {
+          return res.status(400).json({ message: 'tailoredCvText is required' });
+        }
         const candidate = await Candidate.findOne({ where: { user_id: userId } });
         if (!candidate) return res.status(404).json({ message: 'Candidate profile not found' });
         const originalPath = await getCvFilePathForCandidate(candidate.id);
-        buffer = await buildPdfFromOriginalTemplate(originalPath, trimmed);
-      } else if (structuredResume && typeof structuredResume === 'object' && structuredResume.name != null) {
-        buffer = await buildPdfFromStructuredResume(structuredResume as StructuredResumeData);
+        buffer = await buildPdfFromOriginalTemplate(originalPath, tailoredCvText.trim());
       } else {
-        buffer = await buildPdfWithProfessionalTemplate(trimmed);
+        const tailoredCoerced = coerceTailoredStructuredForTemplate(structuredResume);
+        if (tailoredCoerced) {
+          let forPdf = tailoredCoerced;
+          try {
+            const candidate = await Candidate.findOne({ where: { user_id: userId } });
+            if (candidate) {
+              const cvText = await getCvTextForCandidate(candidate.id);
+              if (cvText?.trim()) forPdf = mergeAwardsFromCvFallback(tailoredCoerced, cvText);
+            }
+          } catch (_) {
+            /* use tailoredCoerced */
+          }
+          const html = buildResumeHTMLTemplate(forPdf, {
+            highlightTerms: pdfHighlightTerms.length ? pdfHighlightTerms : undefined,
+          });
+          buffer = await renderHtmlToPdfBuffer(html);
+        } else {
+          if (!tailoredCvText || typeof tailoredCvText !== 'string') {
+            return res.status(400).json({ message: 'tailoredCvText is required when structured resume is not available' });
+          }
+          const trimmed = tailoredCvText.trim();
+          if (structuredResume && typeof structuredResume === 'object' && (structuredResume as StructuredResumeData).name != null) {
+            const sr = structuredResume as StructuredResumeData & { skills?: unknown };
+            if (Array.isArray(sr.skills)) {
+              buffer = await buildPdfFromStructuredResume(structuredResume as StructuredResumeData);
+            } else {
+              buffer = await buildPdfWithProfessionalTemplate(trimmed);
+            }
+          } else {
+            buffer = await buildPdfWithProfessionalTemplate(trimmed);
+          }
+        }
       }
 
       res.setHeader('Content-Type', 'application/pdf');

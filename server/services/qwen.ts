@@ -1184,6 +1184,137 @@ Return ONLY valid JSON:
   }
 
   /**
+   * Tailor resume for a job — returns a single JSON object matching the structured schema (preview + PDF).
+   */
+  async tailorResumeStructuredJson(
+    resumeText: string,
+    jobDescription: string,
+    jobTitle: string,
+    jobSkills: string[]
+  ): Promise<{ content: string; usage?: { input_tokens: number; output_tokens: number; total_tokens: number } }> {
+    const resumeBlock = resumeText.substring(0, 12000);
+    const jobBlock = jobDescription.substring(0, 8000);
+    const SYSTEM_PROMPT = `You are an expert resume tailor. Your job is to analyze a candidate's resume and a job description, then return a tailored version of the resume as a strictly valid JSON object.
+
+CRITICAL RULES:
+1. You MUST respond with ONLY a valid JSON object — no markdown, no code fences, no explanation, no preamble.
+2. NEVER omit any key from the schema, even if the value is empty. Use "" for empty strings and [] for empty arrays.
+3. NEVER mix content between sections. Each field must only contain data that belongs to it.
+4. NEVER invent or hallucinate information. Only use what is in the original resume.
+5. You MAY rephrase bullet points to better align with the job description, but must preserve the original meaning and facts.
+6. Mark items as relevant or irrelevant — do NOT remove any experience or projects entirely.
+7. Relevance is determined by how closely the item matches the skills, responsibilities, or requirements in the job description.
+8. SKILLS: Include every professional/technical skill from the resume in "skills". Do NOT put human spoken or signed languages here (English, Urdu, Somali, Arabic, etc.)—those belong ONLY in "languages" (rule 13). Put job-relevant skills first; the app will highlight matches to the job posting.
+9. EXPERIENCE "description" (required for every role that has any content under that job):
+   - Source text ONLY from that job block on the resume (intro paragraph, role summary, or the bullets themselves).
+   - If that experience is RELEVANT to the target job (isRelevant: true): copy the resume's narrative/summary for that role COMPLETELY — do not shorten it.
+   - If that experience is NOT relevant (isRelevant: false): still include a description, but SUMMARIZE or minimize it to 1–3 tight factual sentences (keep what a recruiter needs to understand the role).
+   - If the resume has NO prose paragraph but HAS bullets: write a short factual overview (2–4 sentences max) synthesized ONLY from those bullets — never leave "description" empty when bullets or any role text exist.
+10. CERTIFICATIONS vs AWARDS (two sections only when the CV has both): (a) "certifications": ONLY vendor/course credentials (Microsoft Learn, Google Cloud, AWS cert, license, diploma course, etc.). NEVER list competition wins, hackathons, merit awards, or prizes here—those belong ONLY in "awardsAndAchievements". Each cert ONCE: if the same certificate appears twice in the resume (e.g. same title with/without issuer or date split differently), output a single merged object with the fullest name, issuer, and year—never duplicate the same certification. (b) "awardsAndAchievements": If the resume has ANY heading like Awards, Achievements, Honors, Competitions, or "Awards & Achievements", you MUST include every distinct award/honor from that section. Each object: name, issuer, year, isRelevant, plus "description" (1–3 short factual sentences synthesized ONLY from resume text tied to that award—e.g. sub-bullets or the line context; use "" if the title line alone is complete) and "skills" (same rule as project techStack: only tools/domains literally written on the resume next to or inside that award's text; else []). "issuer" is ONLY the host/organization/event name (e.g. university, company, competition body)—NEVER a comma-separated tool list, NEVER technologies. "year" is ONLY a date or calendar year—NEVER tools. Put every tool for that award ONLY in "skills" (or [] if the resume names none). Never concatenate tool names into one string without spaces. Use [] only if the resume truly has no awards/achievements section at all. Never omit the key. Never put the same fact in both arrays.
+11. PROJECT techStack: Use [] unless a technology, framework, or tool is EXPLICITLY named in the candidate's resume in that project's title, description, or bullets. Never infer tech from the job posting, never guess, never copy from the global skills list unless that tech appears in that project's own text on the CV.
+12. BULLETS (experience and projects): Each bullet must be a distinct fact. NEVER output two bullets that restate the same point in different wording (e.g. original line + AI-rewritten duplicate). Keep exactly one bullet per fact—the clearest version aligned to the job.
+13. LANGUAGES: Put every human language the candidate lists (English, Urdu, Somali, Arabic, French, etc.) in the "languages" array as { "language": "...", "proficiency": "..." } with proficiency from the resume or "" if unknown. If the resume has a Languages section, merge all entries there. Never list those as technical skills in "skills".`;
+
+    const userPrompt = `Here is the candidate's resume:
+<resume>
+${resumeBlock}
+</resume>
+
+Here is the job description:
+<job_description>
+${jobBlock}
+
+Job title: ${jobTitle}
+Key skills from posting: ${jobSkills.join(', ')}
+</job_description>
+
+Tailor the resume for this job and return ONLY a JSON object matching this exact schema:
+
+{
+  "name": "string",
+  "email": "string",
+  "phone": "string",
+  "location": "string",
+  "links": {
+    "linkedin": "string",
+    "github": "string",
+    "portfolio": "string",
+    "other": []
+  },
+  "summary": "string — rewrite this to target the job description specifically",
+  "skills": ["EVERY skill from the candidate's resume as separate strings — do not omit any; order job-relevant skills first if helpful"],
+  "experience": [
+    {
+      "title": "string",
+      "company": "string",
+      "duration": "string",
+      "description": "string — if isRelevant true: full role narrative from resume; if false: shortened summary; if only bullets exist, synthesize from bullets; never \"\" when that job has bullets or any text",
+      "isRelevant": true or false,
+      "bullets": [
+        {
+          "text": "string — rewritten bullet point aligned to job description",
+          "isRelevant": true or false
+        }
+      ]
+    }
+  ],
+  "projects": [
+    {
+      "name": "string",
+      "description": "string",
+      "techStack": ["only technologies literally written in the resume for this project; else []"],
+      "isRelevant": true or false,
+      "bullets": [
+        {
+          "text": "string — rewritten bullet point aligned to job description",
+          "isRelevant": true or false
+        }
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "string",
+      "institution": "string",
+      "year": "string",
+      "grade": "string"
+    }
+  ],
+  "certifications": [
+    {
+      "name": "string — certification or license name exactly as on resume",
+      "issuer": "string — issuing org or \"\"",
+      "year": "string — year earned or expiry year or \"\"",
+      "isRelevant": true or false
+    }
+  ],
+  "awardsAndAchievements": [
+    {
+      "name": "string — award, competition, honor, or prize line as on resume",
+      "issuer": "string — host/org/event name ONLY; never tools or comma-separated tech; \"\" if none",
+      "year": "string — date or year ONLY; never tools; \"\" if none",
+      "description": "string — brief factual context from the resume only (sub-bullets or surrounding text); \"\" if unnecessary",
+      "skills": ["only tools/domains literally in the resume for this award; else []"],
+      "isRelevant": true or false
+    }
+  ],
+  "languages": [
+    {
+      "language": "string — e.g. English, Urdu, Somali (only human languages from the resume)",
+      "proficiency": "string — e.g. Native, Fluent, Bilingual, or \"\""
+    }
+  ],
+  "keyChanges": [
+    "string — brief explanation of each major change made and why"
+  ]
+}
+
+Remember: Return ONLY the JSON object. No other text.`;
+
+    return this.callQwenWithMessages(SYSTEM_PROMPT, [{ role: 'user', content: userPrompt }], true);
+  }
+
+  /**
    * Extract structured resume from improved/tailored CV text for template-based rendering.
    * Returns: header (name, email, phone, linkedIn, portfolio), summary, skills, experience, education, projects, certifications.
    */

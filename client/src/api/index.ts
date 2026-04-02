@@ -875,6 +875,7 @@ import type {
   CvTailorResult,
   TailorCvReorderedResult,
   TailorResumeForJobResult,
+  TailoredStructuredResume,
   CoverLetterResult,
   CoverLetterTone,
   JobPostingReviewResult,
@@ -934,9 +935,9 @@ export async function tailorResumeForJob(jobId: string): Promise<TailorResumeFor
 /** Get saved tailored resume for this job (if any). Returns null on 404. */
 export async function getTailoredResumeForJob(
   jobId: string
-): Promise<{ tailoredCvText: string; structuredResume?: import('@/types').StructuredResume } | null> {
+): Promise<{ tailoredCvText: string; structuredResume?: TailoredStructuredResume } | null> {
   try {
-    return await apiGet<{ tailoredCvText: string; structuredResume?: import('@/types').StructuredResume }>(
+    return await apiGet<{ tailoredCvText: string; structuredResume?: TailoredStructuredResume }>(
       `/ai/tailor-resume-for-job/${encodeURIComponent(jobId)}`
     );
   } catch (_) {
@@ -944,11 +945,14 @@ export async function getTailoredResumeForJob(
   }
 }
 
-/** Export tailored resume as PDF (template-based when structuredResume is provided). */
-export async function exportTailoredResumePdf(
-  tailoredCvText: string,
-  structuredResume?: import('@/types').StructuredResume | null
-): Promise<Blob> {
+/** Export tailored resume as PDF (server renders HTML with Puppeteer when structuredResume is present). */
+export async function exportTailoredResumePdf(body: {
+  tailoredCvText: string;
+  structuredResume?: TailoredStructuredResume | null;
+  useOriginalTemplate?: boolean;
+  /** Job keywords to highlight in PDF (same as preview). */
+  highlightTerms?: string[];
+}): Promise<Blob> {
   const url = `${API_BASE_URL}/ai/tailor-resume-for-job/export-pdf`;
   const token = localStorage.getItem('auth_token');
   const res = await fetch(url, {
@@ -957,7 +961,12 @@ export async function exportTailoredResumePdf(
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ tailoredCvText, structuredResume: structuredResume ?? undefined }),
+    body: JSON.stringify({
+      tailoredCvText: body.tailoredCvText,
+      structuredResume: body.structuredResume ?? undefined,
+      useOriginalTemplate: body.useOriginalTemplate ?? false,
+      highlightTerms: body.highlightTerms?.length ? body.highlightTerms : undefined,
+    }),
     credentials: 'include',
   });
   if (!res.ok) {
