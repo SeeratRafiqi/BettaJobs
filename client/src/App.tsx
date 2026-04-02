@@ -54,7 +54,6 @@ import CandidatePrivacySettings from "@/pages/candidate/PrivacySettings";
 
 // Candidate pages (Phase 6 — AI)
 import CvReview from "@/pages/candidate/CvReview";
-import SkillGapAnalysis from "@/pages/candidate/SkillGapAnalysis";
 
 // Company pages (Phase 4)
 import CompanyAnalytics from "@/pages/company/Analytics";
@@ -356,13 +355,6 @@ function Router() {
         <ProtectedRoute>
           <CandidateRoute>
             <CvReview />
-          </CandidateRoute>
-        </ProtectedRoute>
-      </Route>
-      <Route path="/candidate/skill-gap">
-        <ProtectedRoute>
-          <CandidateRoute>
-            <SkillGapAnalysis />
           </CandidateRoute>
         </ProtectedRoute>
       </Route>

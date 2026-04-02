@@ -43,7 +43,6 @@ import {
   Shield,
   Users,
   FileSearch,
-  Target,
   MessageCircleQuestion,
   Timer,
   DollarSign,
@@ -75,7 +74,6 @@ const candidateMenuItems = [
   { title: 'Messages', url: '/messages', icon: MessageSquare },
   { title: 'Notifications', url: '/notifications', icon: Bell },
   { title: 'AI CV Review', url: '/candidate/cv-review', icon: FileSearch },
-  { title: 'Skill Gap', url: '/candidate/skill-gap', icon: Target },
   { title: 'My Profile', url: '/candidate/profile', icon: User },
   { title: 'Privacy', url: '/candidate/privacy', icon: Shield },
 ];
