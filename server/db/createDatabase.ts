@@ -13,7 +13,7 @@ async function createDatabase() {
   };
 
   const dbName = process.env.DB_NAME || 'cv_matcher';
-  const dbUser = process.env.DB_USER || 'root';
+  const dbUser = process.env.DB_USER || 'wu_user';
   const dbPassword = process.env.DB_PASSWORD || '';
 
   // Parse DATABASE_URL if provided
