@@ -93,20 +93,12 @@ app.use((req, res, next) => {
 });
 
 (async () => {
-  // Initialize database (create DB, run migrations) if enabled via env vars
   try {
     await initializeDatabase();
-  } catch (error) {
-    log(`Database initialization failed: ${error}`, "error");
-    // Continue anyway - might be intentional
-  }
-
-  // Test database connection
-  try {
-    await sequelize.authenticate();
-    log("Database connection established successfully");
+    log(`Database connection established (${sequelize.getDialect()})`);
   } catch (error) {
     log(`Database connection failed: ${error}`, "error");
+    // Continue anyway - might be intentional
   }
 
   // Create body parsers

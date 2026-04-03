@@ -78,13 +78,11 @@ Match.init(
       allowNull: false,
       defaultValue: 'pending',
     },
+    // No DB references here: circular FK with Application.match_id → matches.
+    // Sync order: matches before applications would break; link enforced in app / associations.
     application_id: {
       type: DataTypes.STRING(36),
       allowNull: true,
-      references: {
-        model: 'applications',
-        key: 'id',
-      },
     },
     calculated_at: {
       type: DataTypes.DATE,
