@@ -1,7 +1,10 @@
+const path = require('path');
+
 module.exports = {
   apps: [
     {
       name: 'asset-manager',
+      cwd: path.resolve(__dirname),
       script: './dist/index.cjs',
       instances: 1, // Set to 'max' for cluster mode, or a number for specific instances
       exec_mode: 'fork', // 'fork' for single instance, 'cluster' for multiple
@@ -45,6 +48,7 @@ module.exports = {
     // Development mode configuration (optional)
     {
       name: 'asset-manager-dev',
+      cwd: path.resolve(__dirname),
       script: 'tsx',
       args: 'server/index.ts',
       instances: 1,
