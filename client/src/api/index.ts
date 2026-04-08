@@ -76,6 +76,15 @@ export async function getCurrentUser(): Promise<User> {
   return apiGet<User>('/auth/me');
 }
 
+export async function getGoogleAuthEnabled(): Promise<boolean> {
+  try {
+    const r = await apiGet<{ enabled: boolean }>('/auth/google/enabled');
+    return Boolean(r?.enabled);
+  } catch {
+    return false;
+  }
+}
+
 // ==================== CANDIDATE PROFILE (self) ====================
 export async function getCandidateProfile(): Promise<CandidateProfile> {
   return apiGet<CandidateProfile>('/candidate/profile');

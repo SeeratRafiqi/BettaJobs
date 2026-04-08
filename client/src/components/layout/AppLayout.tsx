@@ -174,7 +174,7 @@ export function AppLayout({ children }: AppLayoutProps) {
   };
 
   // Determine avatar image
-  const avatarUrl = user?.photoUrl || user?.logoUrl || undefined;
+  const avatarUrl = user?.photoUrl || user?.logoUrl || user?.avatar || undefined;
 
   const sidebarStyle = {
     '--sidebar-width': '16rem',

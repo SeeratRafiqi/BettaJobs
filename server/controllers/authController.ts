@@ -5,7 +5,7 @@ import { User } from '../db/models/User.js';
 import { Candidate } from '../db/models/Candidate.js';
 import { CompanyProfile } from '../db/models/CompanyProfile.js';
 import { BaseController } from '../db/base/BaseController.js';
-import type { AuthRequest, UserRole } from '../middleware/auth.js';
+import { buildJwtAccessClaims, type AuthRequest, type UserRole } from '../middleware/auth.js';
 
 /** Return a user-friendly message when the error is a DB connection failure (e.g. MySQL not running). */
 function normalizeDbError(error: any): { message: string; status: number } {
@@ -125,16 +125,19 @@ export class AuthController extends BaseController {
         });
       }
 
-      // Generate JWT token
+      // Generate JWT token (same claims shape as Google OAuth — see buildJwtAccessClaims)
       const secret = process.env.JWT_SECRET || process.env.SESSION_SECRET || 'default-secret';
       const token = jwt.sign(
-        {
+        buildJwtAccessClaims({
           id: user.id,
           username: user.username,
           role: user.role,
           email: user.email,
           name: user.name,
-        },
+          avatar: user.avatar,
+          googleId: user.googleId,
+          email_verified: user.email_verified,
+        }),
         secret,
         { expiresIn: '7d' }
       );
@@ -146,6 +149,10 @@ export class AuthController extends BaseController {
           name: user.name,
           email: user.email,
           role: user.role,
+          avatar: user.avatar ?? null,
+          googleId: user.googleId ?? null,
+          email_verified: user.email_verified,
+          auth_provider: user.googleId ? 'google' : 'local',
         },
       };
   }
@@ -188,6 +195,12 @@ export class AuthController extends BaseController {
         throw error;
       }
 
+      if (user.password == null) {
+        const error: any = new Error('Invalid credentials');
+        error.status = 401;
+        throw error;
+      }
+
       const validPassword = await bcrypt.compare(password, user.password);
       if (!validPassword) {
         const error: any = new Error('Invalid credentials');
@@ -197,13 +210,16 @@ export class AuthController extends BaseController {
 
       const secret = process.env.JWT_SECRET || process.env.SESSION_SECRET || 'default-secret';
       const token = jwt.sign(
-        {
+        buildJwtAccessClaims({
           id: user.id,
           username: user.username,
           role: user.role,
           email: user.email,
           name: user.name,
-        },
+          avatar: user.avatar,
+          googleId: user.googleId,
+          email_verified: user.email_verified,
+        }),
         secret,
         { expiresIn: '7d' }
       );
@@ -215,6 +231,10 @@ export class AuthController extends BaseController {
           name: user.name,
           email: user.email,
           role: user.role,
+          avatar: user.avatar ?? null,
+          googleId: user.googleId ?? null,
+          email_verified: user.email_verified,
+          auth_provider: user.googleId ? 'google' : 'local',
         },
       };
   }
@@ -239,13 +259,16 @@ export class AuthController extends BaseController {
 
       const secret = process.env.JWT_SECRET || process.env.SESSION_SECRET || 'default-secret';
       const token = jwt.sign(
-        {
+        buildJwtAccessClaims({
           id: user.id,
           username: user.username,
           role: user.role,
           email: user.email,
           name: user.name,
-        },
+          avatar: user.avatar,
+          googleId: user.googleId,
+          email_verified: user.email_verified,
+        }),
         secret,
         { expiresIn: '7d' }
       );
@@ -275,6 +298,10 @@ export class AuthController extends BaseController {
         name: user.name,
         email: user.email,
         role: user.role,
+        avatar: user.avatar ?? null,
+        googleId: user.googleId ?? null,
+        email_verified: user.email_verified,
+        auth_provider: user.googleId ? 'google' : 'local',
       };
 
       if (user.role === 'candidate') {

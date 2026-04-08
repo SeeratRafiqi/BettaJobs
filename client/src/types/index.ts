@@ -11,6 +11,11 @@ export interface User {
   companyName?: string;
   photoUrl?: string;
   logoUrl?: string;
+  /** From JWT / auth API when using Google or linked account */
+  avatar?: string | null;
+  googleId?: string | null;
+  email_verified?: boolean;
+  auth_provider?: 'local' | 'google';
 }
 
 // CV Status Types
