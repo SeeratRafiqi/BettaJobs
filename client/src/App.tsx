@@ -11,7 +11,6 @@ import { useEffect } from "react";
 // Auth pages
 import Login from "@/pages/Login";
 import Register from "@/pages/Register";
-import GoogleAuthCallback from "@/pages/GoogleAuthCallback";
 import NotFound from "@/pages/not-found";
 
 // Admin pages
@@ -173,7 +172,6 @@ function Router() {
       <Route path="/" component={HomeRedirect} />
       <Route path="/login" component={Login} />
       <Route path="/register" component={Register} />
-      <Route path="/auth/google/callback" component={GoogleAuthCallback} />
 
       {/* Admin Routes */}
       <Route path="/admin/dashboard">

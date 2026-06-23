@@ -84,10 +84,13 @@ Application.init(
       type: DataTypes.TEXT,
       allowNull: true,
     },
-    // No DB references here: circular FK with Match.application_id → applications.
     match_id: {
       type: DataTypes.STRING(36),
       allowNull: true,
+      references: {
+        model: 'matches',
+        key: 'id',
+      },
     },
     notes: {
       type: DataTypes.JSON,

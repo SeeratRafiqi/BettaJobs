@@ -16,12 +16,8 @@ import sequelize from "./db/config.js";
 import "./db/models/index.js"; // Initialize models
 import { initializeDatabase } from "./db/init.js";
 import { interviewController } from "./controllers/interviewController.js";
-import session from "express-session";
-import sessionMemoryStore from "memorystore";
-import passport from "./utils/passport.js";
 
 const app = express();
-const MemoryStore = sessionMemoryStore(session);
 const httpServer = createServer(app);
 
 declare module "http" {
@@ -97,12 +93,20 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  // Initialize database (create DB, run migrations) if enabled via env vars
   try {
     await initializeDatabase();
-    log(`Database connection established (${sequelize.getDialect()})`);
+  } catch (error) {
+    log(`Database initialization failed: ${error}`, "error");
+    // Continue anyway - might be intentional
+  }
+
+  // Test database connection
+  try {
+    await sequelize.authenticate();
+    log("Database connection established successfully");
   } catch (error) {
     log(`Database connection failed: ${error}`, "error");
-    // Continue anyway - might be intentional
   }
 
   // Create body parsers
@@ -143,29 +147,6 @@ app.use((req, res, next) => {
     }
     next();
   });
-
-  if (process.env.TRUST_PROXY === "1" || process.env.NODE_ENV === "production") {
-    app.set("trust proxy", 1);
-  }
-
-  // Session + Passport (Google OAuth state). Scoped to short-lived OAuth cookie; JWT is used for API auth.
-  app.use(
-    session({
-      store: new MemoryStore({ checkPeriod: 86400000 }),
-      name: "cv_matcher_sid",
-      secret: process.env.SESSION_SECRET || process.env.JWT_SECRET || "change-me-dev-session",
-      resave: false,
-      saveUninitialized: false,
-      cookie: {
-        httpOnly: true,
-        secure: process.env.SESSION_COOKIE_SECURE === "true" || process.env.NODE_ENV === "production",
-        sameSite: "lax",
-        maxAge: 20 * 60 * 1000,
-      },
-    }),
-  );
-  app.use(passport.initialize());
-  app.use(passport.session());
 
   // Register routes AFTER body parsers
   // Multer in routes will handle multipart requests (body parsers skip them)

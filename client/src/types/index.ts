@@ -11,11 +11,6 @@ export interface User {
   companyName?: string;
   photoUrl?: string;
   logoUrl?: string;
-  /** From JWT / auth API when using Google or linked account */
-  avatar?: string | null;
-  googleId?: string | null;
-  email_verified?: boolean;
-  auth_provider?: 'local' | 'google';
 }
 
 // CV Status Types
@@ -230,6 +225,8 @@ export interface Application {
   coverLetter?: string;
   cvType?: CvType;
   submittedCvText?: string | null;
+  cvFileId?: string | null;
+  cvFileName?: string | null;
   appliedAt: string;
   updatedAt: string;
   matchScore?: number | null;

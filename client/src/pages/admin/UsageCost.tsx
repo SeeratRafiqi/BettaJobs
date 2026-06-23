@@ -85,12 +85,6 @@ export default function UsageCost() {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold">Usage & Cost</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Data from your database (<code className="text-xs bg-muted px-1 rounded">usage_logs</code>). Refreshes every ~25s while this tab is open.
-          </p>
-          <p className="text-sm text-muted-foreground mt-1">
-            International rates: LLM $0.05 / $0.2 per 1M tokens; TTS $0.115 per 10K characters. Override in .env to match your bill.
-          </p>
           {pricingDocUrl && (
             <a href={pricingDocUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-primary hover:underline mt-1 inline-block">
               Alibaba Model Studio pricing (official) →
@@ -217,9 +211,6 @@ export default function UsageCost() {
             <Cpu className="w-5 h-5" />
             APIs we use ({externalApis?.length ?? 0})
           </CardTitle>
-          <p className="text-sm text-muted-foreground font-normal">
-            International rates: LLM $0.05 / $0.2 per 1M tokens; TTS $0.115 per 10K chars. Cost and token usage below are in real time from API responses.
-          </p>
         </CardHeader>
         <CardContent>
           {(!externalApis || externalApis.length === 0) && (

@@ -12,11 +12,65 @@ import {
   PipelineStage,
 } from '../db/models/index.js';
 import { CvFile } from '../db/models/CvFile.js';
+import { TailoredResume } from '../db/models/TailoredResume.js';
 import { BaseController } from '../db/base/BaseController.js';
 import type { AuthRequest } from '../middleware/auth.js';
 import { randomUUID } from 'crypto';
 import { notificationService } from '../services/notificationService.js';
 import { pdfParserService } from '../services/pdfParser.js';
+import sequelize from '../db/config.js';
+import { buildPdfFromOriginalTemplate } from '../services/pdfTemplateExport.js';
+import { buildPdfWithProfessionalTemplate } from '../services/pdfResumeTemplate.js';
+import { renderHtmlToPdfBuffer } from '../services/htmlPdf.js';
+import { buildResumeHTMLTemplate } from '../../shared/tailoredResumeHtml.js';
+import fs from 'node:fs';
+import path from 'node:path';
+
+let submittedCvFileIdColumnEnsured = false;
+async function ensureSubmittedCvFileIdColumn(): Promise<void> {
+  if (submittedCvFileIdColumnEnsured) return;
+  try {
+    await sequelize.query('ALTER TABLE applications ADD COLUMN submitted_cv_file_id VARCHAR(36) NULL').catch(() => {});
+  } catch {
+    /* column may already exist */
+  }
+  submittedCvFileIdColumnEnsured = true;
+}
+
+async function resolveCvFileForCandidate(candidateId: string): Promise<CvFile | null> {
+  const primary = await CvFile.findOne({
+    where: { candidate_id: candidateId, is_primary: true },
+    order: [['uploaded_at', 'DESC']],
+  });
+  if (primary?.file_path) return primary;
+  return CvFile.findOne({
+    where: { candidate_id: candidateId },
+    order: [['uploaded_at', 'DESC']],
+  });
+}
+
+async function resolveCvFileForApplication(application: {
+  candidate_id: string;
+  submitted_cv_file_id?: string | null;
+}): Promise<CvFile | null> {
+  if (application.submitted_cv_file_id) {
+    const pinned = await CvFile.findByPk(application.submitted_cv_file_id);
+    if (pinned?.file_path) return pinned;
+  }
+  return resolveCvFileForCandidate(application.candidate_id);
+}
+
+function resolveAbsoluteFilePath(filePath: string): string {
+  return path.isAbsolute(filePath) ? filePath : path.resolve(process.cwd(), filePath);
+}
+
+function contentTypeForCvFilename(filename: string): string {
+  const ext = path.extname(filename || '').toLowerCase();
+  if (ext === '.pdf') return 'application/pdf';
+  if (ext === '.doc') return 'application/msword';
+  if (ext === '.docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  return 'application/octet-stream';
+}
 
 async function getCvTextForCandidate(candidateId: string): Promise<string> {
   const cvFile = await CvFile.findOne({
@@ -95,6 +149,10 @@ export class ApplicationController extends BaseController {
         throw err;
       }
 
+      await ensureSubmittedCvFileIdColumn();
+      const cvFileForApply = useTailored ? null : await resolveCvFileForCandidate(candidate.id);
+      const submittedCvFileId = cvFileForApply?.id ?? null;
+
       // Check if already applied
       const existingApp = await Application.findOne({
         where: { candidate_id: candidate.id, job_id: jobId },
@@ -107,9 +165,10 @@ export class ApplicationController extends BaseController {
             cover_letter: coverLetter || existingApp.cover_letter,
             cv_type: resolvedCvType,
             submitted_cv_text: submittedCvText || null,
+            submitted_cv_file_id: submittedCvFileId,
             applied_at: new Date(),
             updated_at: new Date(),
-          });
+          } as any);
           return this.formatApplication(existingApp, job);
         }
         const error: any = new Error('You have already applied to this job');
@@ -142,9 +201,10 @@ export class ApplicationController extends BaseController {
         cover_letter: coverLetter || null,
         cv_type: resolvedCvType,
         submitted_cv_text: submittedCvText || null,
+        submitted_cv_file_id: submittedCvFileId,
         match_id: existingMatch?.id || null,
         pipeline_stage_id: pipelineStageId,
-      });
+      } as any);
 
       // If no match exists, trigger calculation in background
       if (!existingMatch) {
@@ -311,6 +371,8 @@ export class ApplicationController extends BaseController {
       // Exclude withdrawn
       where.status = where.status || { [Op.ne]: 'withdrawn' };
 
+      await ensureSubmittedCvFileIdColumn();
+
       const order: any[] = [];
       if (sortBy === 'score') {
         // Will sort after fetching since score is on match
@@ -333,12 +395,48 @@ export class ApplicationController extends BaseController {
         order,
       });
 
-      let result = applications.map((app: any) => ({
+      const candidateIds = [...new Set(applications.map((app) => app.candidate_id).filter(Boolean))];
+      const pinnedCvIds = [
+        ...new Set(
+          applications
+            .map((app) => (app as any).submitted_cv_file_id as string | null | undefined)
+            .filter((id): id is string => !!id),
+        ),
+      ];
+      const cvFiles = candidateIds.length || pinnedCvIds.length
+        ? await CvFile.findAll({
+            where: {
+              [Op.or]: [
+                ...(candidateIds.length ? [{ candidate_id: candidateIds }] : []),
+                ...(pinnedCvIds.length ? [{ id: pinnedCvIds }] : []),
+              ],
+            },
+            order: [['uploaded_at', 'DESC']],
+            attributes: ['id', 'candidate_id', 'filename'],
+          })
+        : [];
+      const cvById = new Map(cvFiles.map((cv) => [cv.id, { id: cv.id, filename: cv.filename }]));
+      const latestCvByCandidate = new Map<string, { id: string; filename: string }>();
+      for (const cv of cvFiles) {
+        if (!latestCvByCandidate.has(cv.candidate_id)) {
+          latestCvByCandidate.set(cv.candidate_id, { id: cv.id, filename: cv.filename });
+        }
+      }
+
+      let result = applications.map((app: any) => {
+        const pinnedCv = app.submitted_cv_file_id ? cvById.get(app.submitted_cv_file_id) : undefined;
+        const latestCv = pinnedCv || latestCvByCandidate.get(app.candidate_id);
+        return {
         id: app.id,
         candidateId: app.candidate_id,
         jobId: app.job_id,
         status: app.status,
         coverLetter: app.cover_letter,
+        cvType: app.cv_type || 'original',
+        submittedCvText: app.submitted_cv_text || null,
+        submittedCvFileId: app.submitted_cv_file_id || latestCv?.id || null,
+        cvFileId: latestCv?.id || null,
+        cvFileName: latestCv?.filename || null,
         appliedAt: app.applied_at,
         updatedAt: app.updated_at,
         matchScore: app.match?.score || null,
@@ -354,7 +452,8 @@ export class ApplicationController extends BaseController {
           headline: app.candidate.headline,
           photoUrl: app.candidate.photo_url,
         } : null,
-      }));
+      };
+      });
 
       // Sort by score if requested
       if (sortBy === 'score') {
@@ -712,6 +811,121 @@ export class ApplicationController extends BaseController {
           } : null,
         })),
       };
+    });
+  }
+
+  // ==================== COMPANY: Download resume for an application ====================
+  async downloadResume(req: AuthRequest, res: Response) {
+    await this.handleRequest(req, res, async () => {
+      if (!req.user) {
+        const error: any = new Error('Authentication required');
+        error.status = 401;
+        throw error;
+      }
+
+      await ensureSubmittedCvFileIdColumn();
+
+      const { id } = req.params;
+      const application = await Application.findByPk(id, {
+        include: [
+          { model: Job, as: 'job' },
+          { model: Candidate, as: 'candidate', attributes: ['id', 'name'] },
+        ],
+      });
+      if (!application) {
+        const error: any = new Error('Application not found');
+        error.status = 404;
+        throw error;
+      }
+
+      const job = (application as any).job as Job | undefined;
+      if (!job) {
+        const error: any = new Error('Job not found');
+        error.status = 404;
+        throw error;
+      }
+
+      if (req.user.role === 'company') {
+        const company = await CompanyProfile.findOne({ where: { user_id: req.user.id } });
+        if (!company || job.company_id !== company.id) {
+          const error: any = new Error('Access denied');
+          error.status = 403;
+          throw error;
+        }
+      } else if (req.user.role !== 'admin') {
+        const error: any = new Error('Access denied');
+        error.status = 403;
+        throw error;
+      }
+
+      const candidateName = ((application as any).candidate?.name || 'candidate').replace(/[^\w\-]+/g, '-');
+      const cvType = application.cv_type || 'original';
+      const cvFile = await resolveCvFileForApplication(application as any);
+      const submittedText = application.submitted_cv_text?.trim() || '';
+
+      if (cvType === 'original') {
+        if (!cvFile?.file_path) {
+          const error: any = new Error('Original CV file not found for this application');
+          error.status = 404;
+          throw error;
+        }
+        const absolutePath = resolveAbsoluteFilePath(cvFile.file_path);
+        if (!fs.existsSync(absolutePath)) {
+          const error: any = new Error('Original CV file is missing on the server');
+          error.status = 404;
+          throw error;
+        }
+        const downloadName = cvFile.filename || `${candidateName}-resume.pdf`;
+        res.setHeader('Content-Type', contentTypeForCvFilename(downloadName));
+        res.download(absolutePath, downloadName, (err) => {
+          if (err) {
+            console.error('Application resume download error:', err);
+            if (!res.headersSent) {
+              res.status(500).json({ message: 'Download failed' });
+            }
+          }
+        });
+        return;
+      }
+
+      let pdfBuffer: Buffer | null = null;
+      let downloadName = `${candidateName}-tailored-resume.pdf`;
+
+      const tailoredRecord = await TailoredResume.findOne({
+        where: { candidate_id: application.candidate_id, job_id: application.job_id },
+      });
+      if (tailoredRecord?.structured_resume) {
+        try {
+          const structured = JSON.parse(tailoredRecord.structured_resume);
+          const html = buildResumeHTMLTemplate(structured);
+          pdfBuffer = await renderHtmlToPdfBuffer(html);
+        } catch (err) {
+          console.warn('[Application] tailored structured PDF export failed:', (err as Error)?.message);
+        }
+      }
+
+      if (!pdfBuffer && cvFile?.file_path && submittedText) {
+        try {
+          pdfBuffer = await buildPdfFromOriginalTemplate(resolveAbsoluteFilePath(cvFile.file_path), submittedText);
+          downloadName = cvFile.filename?.replace(/\.[^.]+$/, '') ? `${cvFile.filename.replace(/\.[^.]+$/, '')}-tailored.pdf` : downloadName;
+        } catch (err) {
+          console.warn('[Application] original-template tailored PDF export failed:', (err as Error)?.message);
+        }
+      }
+
+      if (!pdfBuffer && submittedText) {
+        pdfBuffer = await buildPdfWithProfessionalTemplate(submittedText);
+      }
+
+      if (!pdfBuffer) {
+        const error: any = new Error('No resume file available for this application');
+        error.status = 404;
+        throw error;
+      }
+
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
+      res.send(pdfBuffer);
     });
   }
 

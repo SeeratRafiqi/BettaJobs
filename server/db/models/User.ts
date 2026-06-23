@@ -5,9 +5,7 @@ import { BaseModel } from '../base/BaseModel.js';
 export interface UserAttributes {
   id: string;
   username: string;
-  password: string | null;
-  googleId: string | null;
-  avatar: string | null;
+  password: string;
   role: 'admin' | 'candidate' | 'company';
   email: string;
   name: string;
@@ -19,9 +17,7 @@ export interface UserAttributes {
 export class User extends BaseModel<UserAttributes> implements UserAttributes {
   declare id: string;
   declare username: string;
-  declare password: string | null;
-  declare googleId: string | null;
-  declare avatar: string | null;
+  declare password: string;
   declare role: 'admin' | 'candidate' | 'company';
   declare email: string;
   declare name: string;
@@ -44,16 +40,7 @@ User.init(
     },
     password: {
       type: DataTypes.STRING(255),
-      allowNull: true,
-    },
-    googleId: {
-      type: DataTypes.STRING(255),
-      allowNull: true,
-      unique: true,
-    },
-    avatar: {
-      type: DataTypes.STRING(2048),
-      allowNull: true,
+      allowNull: false,
     },
     role: {
       type: DataTypes.ENUM('admin', 'candidate', 'company'),

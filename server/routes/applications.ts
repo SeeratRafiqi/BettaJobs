@@ -29,6 +29,9 @@ router.put('/applications/:id/withdraw', authenticateToken, requireCandidate, (r
 router.get('/applications/job/:jobId', authenticateToken, requireAnyRole('company', 'admin'), (req, res) =>
   applicationController.getForJob(req, res)
 );
+router.get('/applications/:id/resume/download', authenticateToken, requireAnyRole('company', 'admin'), (req, res) =>
+  applicationController.downloadResume(req, res)
+);
 router.put('/applications/:id/status', authenticateToken, requireAnyRole('company', 'admin'), (req, res) =>
   applicationController.updateStatus(req, res)
 );

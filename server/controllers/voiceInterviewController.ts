@@ -150,6 +150,20 @@ function getSummaryQuestionAnswerTexts(
   };
 }
 
+/** Minimum substantive answers before generating a partial summary for incomplete sessions. */
+const MIN_ANSWERS_FOR_MIDWAY_SUMMARY = 2;
+
+function countSubstantiveInterviewAnswers(answers: { questionIndex: number; answerText: string }[]): number {
+  return answers.filter((a) => {
+    const t = (a.answerText || '').trim();
+    if (!t || t.length < 3) return false;
+    if (isSilenceAnswer(t) || isSilenceCheckMarker(t)) return false;
+    const lower = t.toLowerCase();
+    if (lower === '(no answer provided)' || lower === '(no answer)' || lower === '(no response)') return false;
+    return true;
+  }).length;
+}
+
 /** Filter to only substantive interview Q&A; exclude greeting and small talk. Keeps questions with length >= 10 so summary can be generated from real Q&A. */
 function filterToInterviewQa(
   questions: { question: string; order: number }[],
@@ -390,14 +404,21 @@ async function assertCompanyAccess(req: AuthRequest, companyId: string) {
   return company;
 }
 
+/** Avoid blocking interview start on slow/large PDFs (e.g. slow disk on deploy). */
+const CV_TEXT_FOR_INTERVIEW_MS = 12_000;
+
 async function getCandidateCvText(candidateId: string): Promise<string> {
   const cvFile = await CvFile.findOne({
     where: { candidate_id: candidateId },
     order: [['uploaded_at', 'DESC']],
   });
   if (!cvFile?.file_path) return '';
+  const parse = pdfParserService.extractText(cvFile.file_path);
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error('cv_parse_timeout')), CV_TEXT_FOR_INTERVIEW_MS)
+  );
   try {
-    return await pdfParserService.extractText(cvFile.file_path);
+    return await Promise.race([parse, timeout]);
   } catch {
     return '';
   }
@@ -805,7 +826,21 @@ export const voiceInterviewController = {
       const hasAnyContent =
         questionTextsForSummary.length > 0 || answerTextsForSummary.some((a) => a.trim().length > 0);
 
-      if (session.status === 'completed' && hasAnyContent && ((!candidateOutcome || !String(candidateOutcome).trim()) || (!recruiterOutcome || !String(recruiterOutcome).trim()))) {
+      const missingCandidateOutcome = !candidateOutcome || !String(candidateOutcome).trim();
+      const missingRecruiterOutcome = !recruiterOutcome || !String(recruiterOutcome).trim();
+      const substantiveAnswerCount = countSubstantiveInterviewAnswers(answers);
+      const isIncompleteSession = session.status === 'in_progress' || session.status === 'expired';
+      const shouldGenerateMidwaySummary =
+        isIncompleteSession &&
+        substantiveAnswerCount >= MIN_ANSWERS_FOR_MIDWAY_SUMMARY &&
+        hasAnyContent &&
+        missingCandidateOutcome;
+      const shouldGenerateCompletedSummary =
+        session.status === 'completed' &&
+        hasAnyContent &&
+        (missingCandidateOutcome || missingRecruiterOutcome);
+
+      if (shouldGenerateCompletedSummary || shouldGenerateMidwaySummary) {
         try {
           const jobTitle = (session as any).job?.title ?? 'Job';
           const outcomeResult = await qwenService.generateVoiceInterviewOutcome({
@@ -813,8 +848,16 @@ export const voiceInterviewController = {
             questions: questionTextsForSummary.length ? questionTextsForSummary : ['Interview completed'],
             answers: answerTextsForSummary.length ? answerTextsForSummary : ['No answers recorded'],
           });
-          const candidateSummary = outcomeResult.candidateSummary;
-          const recruiterSummary = outcomeResult.recruiterSummary;
+          let candidateSummary = outcomeResult.candidateSummary;
+          let recruiterSummary = outcomeResult.recruiterSummary;
+          if (shouldGenerateMidwaySummary) {
+            const candidatePrefix =
+              'You left the interview before all questions were completed. The feedback below is based only on the portion you finished.\n\n';
+            const recruiterPrefix =
+              'Interview incomplete: the candidate left before all allocated questions were answered.\n\n';
+            if (candidateSummary?.trim()) candidateSummary = candidatePrefix + candidateSummary;
+            if (recruiterSummary?.trim()) recruiterSummary = recruiterPrefix + recruiterSummary;
+          }
           if (candidateSummary?.trim()) candidateOutcome = candidateSummary;
           if (recruiterSummary?.trim()) recruiterOutcome = recruiterSummary;
           if (req.user?.id && (outcomeResult as any)._usage) {
@@ -884,12 +927,15 @@ export const voiceInterviewController = {
       const jobTitle = job?.title ?? 'Role';
       const jobDescription = job?.description ?? '';
       const jobSkills = [...(job?.must_have_skills ?? []), ...(job?.nice_to_have_skills ?? [])];
+      const t0 = Date.now();
       const candidateContext = await getCandidateCvText(candidate.id);
+      console.log(`[VoiceInterview] start: CV text loaded in ${Date.now() - t0}ms (${candidateContext ? candidateContext.length : 0} chars)`);
       const candidateName = (candidate as any).name ?? 'there';
       const preferredLanguage = (req.body as any)?.preferredLanguage || 'en';
 
       // State-machine conductor: pre-generate questions based on time constraint (intro + N questions)
       const numInterviewQuestions = Math.max(MIN_INTERVIEW_QUESTIONS, session.max_questions - INTRO_TURNS);
+      const t1 = Date.now();
       const conductorResult = await qwenService.generateConductorQuestions({
         jobTitle,
         jobDescription,
@@ -899,6 +945,7 @@ export const voiceInterviewController = {
         preferredLanguage,
       });
       const conductorQuestions = Array.isArray(conductorResult) ? conductorResult : [];
+      console.log(`[VoiceInterview] start: conductor questions (${conductorQuestions.length}) in ${Date.now() - t1}ms`);
       const conductorUsage = (conductorResult as any)._usage;
       if (req.user?.id && conductorUsage) {
         logUsage(req.user.id, 'voice_interview', {
@@ -919,7 +966,9 @@ export const voiceInterviewController = {
         preferredLanguage,
       };
 
+      const t2 = Date.now();
       const { response, updatedState, usage: startUsage } = await qwenService.startInterview(initialState);
+      console.log(`[VoiceInterview] start: opening greeting in ${Date.now() - t2}ms; total ${Date.now() - t0}ms`);
       if (req.user?.id && startUsage) {
         logUsage(req.user.id, 'voice_interview', {
           inputTokens: startUsage.input_tokens,
@@ -1354,6 +1403,7 @@ export const voiceInterviewController = {
       }
 
       let outcome = session.outcome ?? null;
+      const candidateOutcomeStored = (session as any).candidate_outcome ?? null;
       const { questionTexts: questionTextsForSummary, answerTexts: answerTextsForSummary } = getSummaryQuestionAnswerTexts(
         session.conductor_state ?? undefined,
         answers,
@@ -1363,7 +1413,19 @@ export const voiceInterviewController = {
       const hasAnyContent =
         questionTextsForSummary.length > 0 || answerTextsForSummary.some((a) => a.trim().length > 0);
 
-      if (session.status === 'completed' && (!outcome || !String(outcome).trim()) && hasAnyContent) {
+      const missingRecruiterOutcome = !outcome || !String(outcome).trim();
+      const missingCandidateOutcome = !candidateOutcomeStored || !String(candidateOutcomeStored).trim();
+      const substantiveAnswerCount = countSubstantiveInterviewAnswers(answers);
+      const isIncompleteSession = session.status === 'in_progress' || session.status === 'expired';
+      const shouldGenerateMidwaySummary =
+        isIncompleteSession &&
+        substantiveAnswerCount >= MIN_ANSWERS_FOR_MIDWAY_SUMMARY &&
+        hasAnyContent &&
+        missingRecruiterOutcome;
+      const shouldGenerateCompletedSummary =
+        session.status === 'completed' && hasAnyContent && (missingRecruiterOutcome || missingCandidateOutcome);
+
+      if (shouldGenerateCompletedSummary || shouldGenerateMidwaySummary) {
         try {
           const jobTitle = (session as any).job?.title ?? 'Job';
           const outcomeResult = await qwenService.generateVoiceInterviewOutcome({
@@ -1371,8 +1433,16 @@ export const voiceInterviewController = {
             questions: questionTextsForSummary.length ? questionTextsForSummary : ['Interview completed'],
             answers: answerTextsForSummary.length ? answerTextsForSummary : ['No answers recorded'],
           });
-          const candidateSummary = outcomeResult.candidateSummary;
-          const recruiterSummary = outcomeResult.recruiterSummary;
+          let candidateSummary = outcomeResult.candidateSummary;
+          let recruiterSummary = outcomeResult.recruiterSummary;
+          if (shouldGenerateMidwaySummary) {
+            const candidatePrefix =
+              'You left the interview before all questions were completed. The feedback below is based only on the portion you finished.\n\n';
+            const recruiterPrefix =
+              'Interview incomplete: the candidate left before all allocated questions were answered.\n\n';
+            if (candidateSummary?.trim()) candidateSummary = candidatePrefix + candidateSummary;
+            if (recruiterSummary?.trim()) recruiterSummary = recruiterPrefix + recruiterSummary;
+          }
           if (recruiterSummary?.trim()) outcome = recruiterSummary;
           const cand = await Candidate.findByPk(session.candidate_id, { attributes: ['user_id'] });
           if (cand?.user_id && (outcomeResult as any)._usage) {
@@ -1385,7 +1455,7 @@ export const voiceInterviewController = {
           }
           await session.update({
             outcome: recruiterSummary?.trim() || outcome,
-            candidate_outcome: candidateSummary?.trim() || (session as any).candidate_outcome,
+            candidate_outcome: candidateSummary?.trim() || candidateOutcomeStored,
           } as any);
         } catch (err: any) {
           console.error('[VoiceInterview] lazy outcome generation (getReportForApplication) failed:', err?.message ?? err);

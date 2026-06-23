@@ -12,6 +12,8 @@ export interface CvFileAttributes {
   file_size: number;
   status: CvStatus;
   batch_tag?: string;
+  /** Set when a company org bulk-uploaded the CV; null for candidate self-uploads. */
+  source_company_id?: string | null;
   label?: string;
   is_primary?: boolean;
   uploaded_at?: Date;
@@ -26,6 +28,7 @@ export class CvFile extends BaseModel<CvFileAttributes> implements CvFileAttribu
   declare file_size: number;
   declare status: CvStatus;
   declare batch_tag?: string;
+  declare source_company_id: string | null;
   declare label?: string;
   declare is_primary: boolean;
   declare uploaded_at: Date;
@@ -67,6 +70,14 @@ CvFile.init(
     batch_tag: {
       type: DataTypes.STRING(255),
       allowNull: true,
+    },
+    source_company_id: {
+      type: DataTypes.STRING(36),
+      allowNull: true,
+      references: {
+        model: 'company_profiles',
+        key: 'id',
+      },
     },
     label: {
       type: DataTypes.STRING(255),

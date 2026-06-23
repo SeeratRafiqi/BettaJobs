@@ -11,6 +11,7 @@ import {
   deleteCompanyJob,
   canSendRoleSuggestion,
   sendRoleSuggestion,
+  downloadApplicationResume,
 } from '@/api';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -61,6 +62,7 @@ import {
   Loader2,
   Target,
   Trash2,
+  Download,
 } from 'lucide-react';
 import type { Application, ApplicationStatus } from '@/types';
 
@@ -101,6 +103,8 @@ export default function CompanyJobDetail() {
   const [appSort, setAppSort] = useState('date');
   const [statusAction, setStatusAction] = useState<{ app: Application; newStatus: ApplicationStatus } | null>(null);
   const [selectedApp, setSelectedApp] = useState<Application | null>(null);
+  const [resumeViewApp, setResumeViewApp] = useState<Application | null>(null);
+  const [resumeDownloadingId, setResumeDownloadingId] = useState<string | null>(null);
   const [minScore, setMinScore] = useState(0);
   const [selectedMatch, setSelectedMatch] = useState<any>(null);
   const [messageDialog, setMessageDialog] = useState<{
@@ -180,6 +184,47 @@ export default function CompanyJobDetail() {
       toast({ title: 'Error', description: error.message, variant: 'destructive' });
     },
   });
+
+  const handleDownloadApplicationResume = async (app: Application) => {
+    setResumeDownloadingId(app.id);
+    try {
+      const { blob, filename } = await downloadApplicationResume(app.id);
+      const baseName = (app.candidate?.name || 'candidate').replace(/\s+/g, '-');
+      const fallback =
+        app.cvType === 'tailored'
+          ? `${baseName}-tailored-resume.pdf`
+          : app.cvFileName || `${baseName}-resume.pdf`;
+      const downloadName = filename || fallback;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = downloadName;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      toast({ title: 'Download failed', description: err?.message ?? 'Could not download resume', variant: 'destructive' });
+    } finally {
+      setResumeDownloadingId(null);
+    }
+  };
+
+  const handleViewApplicationResume = async (app: Application) => {
+    if (app.cvType === 'tailored' || !app.cvFileId) {
+      setResumeViewApp(app);
+      return;
+    }
+    setResumeDownloadingId(app.id);
+    try {
+      const { blob } = await downloadApplicationResume(app.id);
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank', 'noopener,noreferrer');
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err: any) {
+      toast({ title: 'Could not open resume', description: err?.message ?? 'Try download instead', variant: 'destructive' });
+    } finally {
+      setResumeDownloadingId(null);
+    }
+  };
 
   const toggleJobStatus = useMutation({
     mutationFn: (newStatus: string) => updateCompanyJob(jobId, { status: newStatus as any }),
@@ -877,6 +922,57 @@ export default function CompanyJobDetail() {
                 </div>
               )}
 
+              {(selectedApp.submittedCvText?.trim() || selectedApp.cvFileId) && (
+                <div className="rounded-lg border border-border bg-muted/40 p-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-start gap-3 min-w-0">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                        <FileText className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium">Resume</p>
+                        <p className="text-xs text-muted-foreground">
+                          {selectedApp.cvType === 'tailored'
+                            ? 'Tailored CV — downloads as PDF in the same template used at apply time'
+                            : selectedApp.cvFileName
+                              ? `Original uploaded file · ${selectedApp.cvFileName}`
+                              : 'Original CV file submitted with this application'}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2 shrink-0">
+                      {selectedApp.submittedCvText?.trim() && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5"
+                          onClick={() => handleViewApplicationResume(selectedApp)}
+                        >
+                          <Eye className="h-4 w-4" />
+                          {selectedApp.cvType === 'tailored' || !selectedApp.cvFileId ? 'View text' : 'View PDF'}
+                        </Button>
+                      )}
+                      <Button
+                        type="button"
+                        variant="default"
+                        size="sm"
+                        className="gap-1.5"
+                        disabled={resumeDownloadingId === selectedApp.id}
+                        onClick={() => handleDownloadApplicationResume(selectedApp)}
+                      >
+                        {resumeDownloadingId === selectedApp.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Download className="h-4 w-4" />
+                        )}
+                        Download PDF
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {selectedApp.coverLetter && (
                 <div>
                   <p className="text-sm font-medium mb-1">Cover Letter</p>
@@ -936,6 +1032,44 @@ export default function CompanyJobDetail() {
               </>
             )}
             <Button variant="outline" onClick={() => setSelectedApp(null)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Resume preview (application modal) */}
+      <Dialog open={!!resumeViewApp} onOpenChange={(open) => !open && setResumeViewApp(null)}>
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Resume — {resumeViewApp?.candidate?.name}</DialogTitle>
+            <DialogDescription>
+              {resumeViewApp?.cvType === 'tailored'
+                ? 'Tailored CV text submitted with this application'
+                : 'CV text snapshot from when they applied'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto rounded-md border bg-muted/30 p-4 text-sm whitespace-pre-wrap leading-relaxed">
+            {resumeViewApp?.submittedCvText?.trim() || 'No resume text available.'}
+          </div>
+          <DialogFooter className="gap-2 sm:justify-between">
+            {resumeViewApp && (
+              <Button
+                type="button"
+                variant="outline"
+                className="gap-1.5"
+                disabled={resumeDownloadingId === resumeViewApp.id}
+                onClick={() => resumeViewApp && handleDownloadApplicationResume(resumeViewApp)}
+              >
+                {resumeDownloadingId === resumeViewApp.id ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Download className="h-4 w-4" />
+                )}
+                Download file
+              </Button>
+            )}
+            <Button variant="outline" onClick={() => setResumeViewApp(null)}>
               Close
             </Button>
           </DialogFooter>

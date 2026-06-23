@@ -42,8 +42,17 @@ const SILENCE_CHECK_SECOND_MS = 7000; // 8s + 7s = 15s total
 /** Min/max delay before AI speaks (simulate thinking). */
 const AI_THINKING_DELAY_MIN_MS = 600;
 const AI_THINKING_DELAY_MAX_MS = 900;
-/** After TTS ends, ignore all speech results for this long so we only capture the user's voice, not the AI's (speaker echo). */
-const IGNORE_AFTER_TTS_MS = 2200;
+/** After TTS ends, ignore speech results briefly to avoid speaker echo (use headphones if echo persists). */
+const IGNORE_AFTER_TTS_MS = 1200;
+
+/** Single mic capture for STT — echo cancellation helps when AI plays through speakers. */
+const AUDIO_CONSTRAINTS: MediaStreamConstraints = {
+  audio: {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  },
+};
 
 /** Returns true if transcript looks like the AI's last question (echo) so we don't submit it as the user's answer. */
 function looksLikeAIEcho(transcript: string, lastSpokenQuestion: string | null): boolean {
@@ -74,7 +83,12 @@ function stopVoiceInterviewTTSPlayback() {
 }
 
 /** Qwen TTS via POST /api/voice-interviews/tts (auth Bearer token via api client). */
-async function speakQuestion(text: string, onEnd?: () => void, languageCode?: string) {
+async function speakQuestion(
+  text: string,
+  onEnd?: () => void,
+  languageCode?: string,
+  onError?: (message: string) => void,
+) {
   const finish = () => {
     onEnd?.();
   };
@@ -87,7 +101,8 @@ async function speakQuestion(text: string, onEnd?: () => void, languageCode?: st
   let blob: Blob;
   try {
     blob = await synthesizeVoiceInterviewTTS(text, lang);
-  } catch {
+  } catch (err) {
+    onError?.(err instanceof Error ? err.message : 'Could not load AI voice audio');
     finish();
     return;
   }
@@ -100,12 +115,14 @@ async function speakQuestion(text: string, onEnd?: () => void, languageCode?: st
     finish();
   };
   audio.onerror = () => {
+    onError?.('AI voice playback failed');
     stopVoiceInterviewTTSPlayback();
     finish();
   };
   try {
     await audio.play();
-  } catch {
+  } catch (err) {
+    onError?.(err instanceof Error ? err.message : 'Could not play AI voice — check browser audio');
     stopVoiceInterviewTTSPlayback();
     finish();
   }
@@ -148,7 +165,6 @@ function VoiceInterviewRoom() {
   const recognitionRef = useRef<any>(null);
   const lastSpokenQuestionRef = useRef<string | null>(null);
   const isListeningRef = useRef(false);
-  const warmedUpRef = useRef(false);
   const vadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestResponseRef = useRef('');
@@ -167,8 +183,14 @@ function VoiceInterviewRoom() {
   const submittedSilenceCheckRef = useRef(false);
   /** Session status from previous render, for refetchInterval (session is defined after useQuery). */
   const sessionStatusRef = useRef<string | undefined>(undefined);
+  /** Last time STT produced a result — used to detect dead recognition while mic UI is on. */
+  const lastRecognitionResultAtRef = useRef(0);
+  /** Stable interview language for effects that must not re-run on session object refetch. */
+  const interviewLangRef = useRef('en');
   /** Called after TTS ends to start a fresh recognition so the next turn captures voice reliably. */
   const restartRecognitionAfterTTSRef = useRef<(langCode: string) => void>(() => {});
+  /** Ensures SpeechRecognition is running when mic is on (called by health watchdog). */
+  const ensureRecognitionActiveRef = useRef<() => void>(() => {});
   /** Reattach the real onresult/onend/onerror to the current rec. Set in startListening; called every time TTS ends so turn 2+ still capture voice. */
   const reattachHandlersRef = useRef<(rec: any, langCode: string) => void>(() => {});
   isListeningRef.current = isListening;
@@ -219,6 +241,18 @@ function VoiceInterviewRoom() {
   }, [session?.status, session?.endsAt, sessionId, queryClient]);
 
   const interviewLang = (session as any)?.preferredLanguage ?? preferredLanguage;
+  interviewLangRef.current = interviewLang || 'en';
+
+  const reportTtsError = useCallback(
+    (message: string) => {
+      toast({
+        title: 'AI voice unavailable',
+        description: message || 'You can still read the question on screen and answer by speaking.',
+        variant: 'destructive',
+      });
+    },
+    [toast],
+  );
 
   // Auto-speak when we have a new current question. After AI speaks, restart recognition so next turn captures voice (continuous call).
   useEffect(() => {
@@ -233,6 +267,7 @@ function VoiceInterviewRoom() {
       latestResponseRef.current = '';
       latestInterimRef.current = '';
       silenceCheckPhaseRef.current = 0;
+      lastSpeechActivityAtRef.current = Date.now();
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
       if (isListeningRef.current) {
         idleTimerRef.current = setTimeout(() => silenceCheckRef.current(), SILENCE_CHECK_FIRST_MS);
@@ -253,15 +288,15 @@ function VoiceInterviewRoom() {
         restartingAfterTTSRef.current = false;
       }, 300);
     };
-    void speakQuestion(q, onEnd, lang || 'en');
-  }, [session?.currentQuestion, session?.status, interviewLang]);
+    void speakQuestion(q, onEnd, lang || 'en', reportTtsError);
+  }, [session?.currentQuestion, session?.status, interviewLang, reportTtsError]);
 
-  // Camera (and request audio too so one prompt grants both camera + mic)
+  // Camera only — mic is owned by audioStreamRef so STT and UI stay in sync (no dual mic capture).
   useEffect(() => {
     if (!cameraOn) return;
     let s: MediaStream | null = null;
     navigator.mediaDevices
-      .getUserMedia({ video: true, audio: true })
+      .getUserMedia({ video: true, audio: false })
       .then((stream) => {
         s = stream;
         streamRef.current = stream;
@@ -319,65 +354,35 @@ function VoiceInterviewRoom() {
     };
   }, [cameraOn, session?.status]);
 
-  // Pre-warm speech recognition when interview is in progress so mic picks up voice immediately when turned on
+  // Pre-acquire microphone when interview is in progress (stable deps — do not tear down on session refetch).
+  const sessionInProgress = session?.status === 'in_progress';
   useEffect(() => {
-    const API = typeof window !== 'undefined' ? (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition : null;
-    if (session?.status !== 'in_progress' || !API || typeof navigator?.mediaDevices?.getUserMedia !== 'function' || warmedUpRef.current) return;
-    warmedUpRef.current = true;
-    let warmupTimeout: ReturnType<typeof setTimeout> | null = null;
-    let rec: any = null;
-    navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+    if (!sessionInProgress || typeof navigator?.mediaDevices?.getUserMedia !== 'function') return;
+    if (audioStreamRef.current?.active) return;
+
+    let cancelled = false;
+    navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS).then((stream) => {
+      if (cancelled) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
       if (audioStreamRef.current) {
         audioStreamRef.current.getTracks().forEach((t) => t.stop());
       }
       audioStreamRef.current = stream;
-      if (recognitionRef.current) {
-        try { recognitionRef.current.stop(); } catch (_) {}
-      }
-      rec = new API();
-      rec.continuous = true;
-      rec.interimResults = true;
-      const langCode = (session as any)?.preferredLanguage ?? preferredLanguage ?? 'en';
-      rec.lang = LANG_BCP47[langCode.split('-')[0]] || 'en-US';
-      rec.onresult = (event: any) => {
-        if (isAISpeakingRef.current || Date.now() < ignoreResultsUntilRef.current) return;
-        lastSpeechActivityAtRef.current = Date.now();
-        let finalText = '';
-        let interimText = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0]?.transcript ?? '';
-          if (event.results[i].isFinal) finalText += transcript + ' ';
-          else interimText += transcript;
-        }
-        if (finalText.trim()) setResponse((prev) => (prev + finalText).trim());
-        setInterimTranscript(interimText);
-      };
-      rec.onend = () => {
-        if (isListeningRef.current && rec) {
-          try { rec.start(); } catch (_) {}
-        }
-      };
-      rec.onerror = () => {};
-      recognitionRef.current = rec;
-      rec.start();
-      warmupTimeout = setTimeout(() => {
-        try { rec?.stop(); } catch (_) {}
-        warmupTimeout = null;
-      }, 2500);
     }).catch(() => {
-      warmedUpRef.current = false;
+      /* Mic permission may be granted later via the Mic button */
     });
+
     return () => {
-      warmedUpRef.current = false;
-      if (warmupTimeout) clearTimeout(warmupTimeout);
-      try { rec?.stop(); } catch (_) {}
-      if (recognitionRef.current === rec) recognitionRef.current = null;
-      if (audioStreamRef.current) {
+      cancelled = true;
+      // Only release mic when leaving in-progress (not when React Query refetches session).
+      if (sessionStatusRef.current !== 'in_progress' && audioStreamRef.current) {
         audioStreamRef.current.getTracks().forEach((t) => t.stop());
         audioStreamRef.current = null;
       }
     };
-  }, [session?.status, session, preferredLanguage]);
+  }, [sessionInProgress, interviewLang]);
 
   const startMutation = useMutation({
     mutationFn: (lang?: string) => startVoiceInterview(sessionId, { preferredLanguage: lang || preferredLanguage }),
@@ -482,6 +487,11 @@ function VoiceInterviewRoom() {
   /** Silence check: no speech for 8s or 15s → submit "(silence 8s)" or "(silence 15s)" and schedule next check. */
   const runSilenceCheck = useCallback(() => {
     if (submittingRef.current || submitMutation.isPending) return;
+    if (isAISpeakingRef.current || Date.now() < ignoreResultsUntilRef.current) {
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = setTimeout(() => silenceCheckRef.current(), 2000);
+      return;
+    }
     const phase = silenceCheckPhaseRef.current;
     const text = phase === 0 ? '(silence 8s)' : '(silence 15s)';
     silenceCheckPhaseRef.current = phase === 0 ? 1 : 0;
@@ -513,6 +523,7 @@ function VoiceInterviewRoom() {
     rec.onresult = (event: any) => {
       if (isAISpeakingRef.current || Date.now() < ignoreResultsUntilRef.current) return;
       lastSpeechActivityAtRef.current = Date.now();
+      lastRecognitionResultAtRef.current = Date.now();
       let finalText = '';
       let interimText = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -541,6 +552,7 @@ function VoiceInterviewRoom() {
     rec.onerror = (e: any) => {
       if (e?.error === 'not-allowed') {
         setIsListening(false);
+        setAudioEnabled(false);
         if (audioStreamRef.current) {
           audioStreamRef.current.getTracks().forEach((t) => t.stop());
           audioStreamRef.current = null;
@@ -548,6 +560,7 @@ function VoiceInterviewRoom() {
         toast({ title: 'Microphone blocked', description: 'Turn on Mic again and choose Allow when the browser asks.', variant: 'destructive' });
         return;
       }
+      if (e?.error === 'no-speech' || e?.error === 'aborted') return;
       // Recover from transient SpeechRecognition failures that can stall auto-submit after a few turns.
       if (!isListeningRef.current || recognitionRef.current !== rec) return;
       setTimeout(() => {
@@ -586,43 +599,53 @@ function VoiceInterviewRoom() {
       return;
     }
     setIsListening(true);
+    setAudioEnabled(true);
     setResponse('');
     setInterimTranscript('');
     latestResponseRef.current = '';
     latestInterimRef.current = '';
     lastSpeechActivityAtRef.current = Date.now();
-    const stream = audioStreamRef.current;
+    lastRecognitionResultAtRef.current = Date.now();
     silenceCheckPhaseRef.current = 0;
-    const langCode = (session as any)?.preferredLanguage ?? preferredLanguage ?? 'en';
+    const langCode = interviewLangRef.current || preferredLanguage || 'en';
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     idleTimerRef.current = setTimeout(() => silenceCheckRef.current(), SILENCE_CHECK_FIRST_MS);
-    // Use pre-warmed recognition if we have it and stream; otherwise create new one
-    const rec = recognitionRef.current;
-    if (rec && stream) {
-      attachRecognitionHandlers(rec, langCode);
-      try { rec.start(); } catch (_) {}
-      return;
+
+    let stream = audioStreamRef.current;
+    if (!stream?.active) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
+        if (audioStreamRef.current) audioStreamRef.current.getTracks().forEach((t) => t.stop());
+        audioStreamRef.current = stream;
+      } catch (e: any) {
+        setIsListening(false);
+        setAudioEnabled(false);
+        if (e?.name === 'NotAllowedError' || e?.message?.includes('Permission')) {
+          toast({ title: 'Microphone access denied', description: 'Allow microphone in your browser to use voice input.', variant: 'destructive' });
+        } else {
+          toast({ title: 'Could not start voice input', description: 'Try again or type your answer.', variant: 'destructive' });
+        }
+        return;
+      }
     }
+
+    let rec = recognitionRef.current;
+    if (!rec) {
+      rec = new SpeechRecognitionAPI();
+      recognitionRef.current = rec;
+    } else {
+      try { rec.stop(); } catch (_) {}
+    }
+    attachRecognitionHandlers(rec, langCode);
     try {
-      const newStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      if (audioStreamRef.current) audioStreamRef.current.getTracks().forEach((t) => t.stop());
-      audioStreamRef.current = newStream;
-      if (recognitionRef.current) {
-        try { recognitionRef.current.stop(); } catch (_) {}
-      }
-      const newRec = new SpeechRecognitionAPI();
-      attachRecognitionHandlers(newRec, langCode);
-      recognitionRef.current = newRec;
-      newRec.start();
-    } catch (e: any) {
-      setIsListening(false);
-      if (e?.name === 'NotAllowedError' || e?.message?.includes('Permission')) {
-        toast({ title: 'Microphone access denied', description: 'Allow microphone in your browser to use voice input.', variant: 'destructive' });
-      } else {
-        toast({ title: 'Could not start voice input', description: 'Try again or type your answer.', variant: 'destructive' });
-      }
+      rec.start();
+    } catch (_) {
+      setTimeout(() => {
+        if (!isListeningRef.current || recognitionRef.current !== rec) return;
+        try { rec.start(); } catch (_) {}
+      }, 200);
     }
-  }, [SpeechRecognitionAPI, toast, session, preferredLanguage, attachRecognitionHandlers]);
+  }, [SpeechRecognitionAPI, toast, preferredLanguage, attachRecognitionHandlers]);
 
   // Keep reattach ref in sync so TTS onEnd can reattach the real onresult every time (fixes turn 2+ not capturing voice).
   useEffect(() => {
@@ -636,7 +659,10 @@ function VoiceInterviewRoom() {
     restartRecognitionAfterTTSRef.current = (langCode: string) => {
       if (!isListeningRef.current) return;
       const rec = recognitionRef.current;
-      if (!rec) return;
+      if (!rec) {
+        ensureRecognitionActiveRef.current();
+        return;
+      }
       restartingAfterTTSRef.current = true;
       rec.onend = () => {}; // prevent onend from restarting while we do delayed start
       try { rec.stop(); } catch (_) {}
@@ -650,8 +676,48 @@ function VoiceInterviewRoom() {
     };
   }, [attachRecognitionHandlers]);
 
+  // Keep STT alive: if mic is on but recognition died (e.g. after session refetch), restart it.
+  useEffect(() => {
+    ensureRecognitionActiveRef.current = () => {
+      if (!isListeningRef.current || !SpeechRecognitionAPI) return;
+      const langCode = interviewLangRef.current || 'en';
+      const rec = recognitionRef.current;
+      if (!rec) {
+        const newRec = new SpeechRecognitionAPI();
+        attachRecognitionHandlers(newRec, langCode);
+        recognitionRef.current = newRec;
+        try { newRec.start(); } catch (_) {}
+        return;
+      }
+      attachRecognitionHandlers(rec, langCode);
+      try { rec.start(); } catch (_) {}
+    };
+  }, [SpeechRecognitionAPI, attachRecognitionHandlers]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (!isListeningRef.current || isAISpeakingRef.current) return;
+      if (Date.now() < ignoreResultsUntilRef.current) return;
+      const rec = recognitionRef.current;
+      const streamActive = audioStreamRef.current?.active;
+      if (!rec || !streamActive) {
+        ensureRecognitionActiveRef.current();
+        return;
+      }
+      const sinceResult = Date.now() - lastRecognitionResultAtRef.current;
+      const sinceSpeech = Date.now() - lastSpeechActivityAtRef.current;
+      if (sinceResult > 12000 && sinceSpeech > 12000 && !submittingRef.current) {
+        const langCode = interviewLangRef.current || 'en';
+        restartRecognitionAfterTTSRef.current(langCode);
+        lastRecognitionResultAtRef.current = Date.now();
+      }
+    }, 4000);
+    return () => clearInterval(interval);
+  }, []);
+
   const stopListening = useCallback(() => {
     setIsListening(false);
+    setAudioEnabled(false);
     setInterimTranscript('');
     if (vadTimerRef.current) {
       clearTimeout(vadTimerRef.current);
@@ -678,9 +744,9 @@ function VoiceInterviewRoom() {
     if (!q) return;
     lastSpokenQuestionRef.current = q;
     setIsAISpeaking(true);
-    const lang = (session as any)?.preferredLanguage ?? preferredLanguage;
-    void speakQuestion(q, () => setIsAISpeaking(false), lang || 'en');
-  }, [session?.currentQuestion, session, preferredLanguage]);
+    const lang = interviewLangRef.current || preferredLanguage;
+    void speakQuestion(q, () => setIsAISpeaking(false), lang || 'en', reportTtsError);
+  }, [session?.currentQuestion, preferredLanguage, reportTtsError]);
 
   const handleEndInterview = useCallback(() => {
     stopListening();
@@ -690,7 +756,7 @@ function VoiceInterviewRoom() {
 
   const requestCameraAndMic = useCallback(() => {
     navigator.mediaDevices
-      .getUserMedia({ video: true, audio: true })
+      .getUserMedia({ video: true, audio: AUDIO_CONSTRAINTS.audio as MediaTrackConstraints })
       .then((stream) => {
         stream.getTracks().forEach((t) => t.stop());
         toast({ title: 'Camera & microphone allowed', description: 'You can now start the interview and use video and voice.' });
@@ -957,10 +1023,10 @@ function VoiceInterviewRoom() {
             </div>
           )}
           <div className="absolute top-4 left-4 flex items-center gap-2 bg-black/50 backdrop-blur-sm rounded-full px-4 py-2">
-            <div className={`w-2 h-2 rounded-full ${isListening ? 'bg-red-500 animate-pulse' : 'bg-gray-500'}`} />
+            <div className={`w-2 h-2 rounded-full ${isListening && audioEnabled ? 'bg-red-500 animate-pulse' : 'bg-gray-500'}`} />
             <span className="text-sm font-medium text-white">You</span>
           </div>
-          {isListening && (
+          {isListening && audioEnabled && (
             <div className="absolute bottom-4 right-4 bg-black/50 backdrop-blur-sm rounded-lg px-4 py-2">
               <div className="text-xs text-gray-300">
                 {speechSupported ? 'Listening…' : 'Type your answer below'}
@@ -1024,7 +1090,7 @@ function VoiceInterviewRoom() {
                   aria-label="Voice-to-text transcript (read-only)"
                 >
                   <p className="text-gray-300 whitespace-pre-wrap break-words min-h-[4rem]">
-                    {response + (isListening && interimTranscript ? interimTranscript : '') || (speechSupported ? 'Your speech will appear here. Answer is sent automatically after 6 seconds of silence.' : '—')}
+                    {response + (isListening && audioEnabled && interimTranscript ? interimTranscript : '') || (speechSupported ? 'Your speech will appear here. Answer is sent automatically after 2.5 seconds of silence.' : '—')}
                   </p>
                 </div>
                 {submitMutation.isPending && (

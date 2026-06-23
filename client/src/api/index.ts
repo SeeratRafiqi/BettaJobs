@@ -76,13 +76,10 @@ export async function getCurrentUser(): Promise<User> {
   return apiGet<User>('/auth/me');
 }
 
+/** Whether the server has Google OAuth configured (for “Continue with Google”). */
 export async function getGoogleAuthEnabled(): Promise<boolean> {
-  try {
-    const r = await apiGet<{ enabled: boolean }>('/auth/google/enabled');
-    return Boolean(r?.enabled);
-  } catch {
-    return false;
-  }
+  const r = await apiGet<{ enabled: boolean }>('/auth/google/enabled');
+  return Boolean(r.enabled);
 }
 
 // ==================== CANDIDATE PROFILE (self) ====================
@@ -467,6 +464,28 @@ export async function getApplicationsForJob(jobId: string, filters?: {
 
 export async function updateApplicationStatus(applicationId: string, status: ApplicationStatus): Promise<{ message: string }> {
   return apiPut<{ message: string }>(`/applications/${applicationId}/status`, { status });
+}
+
+export async function downloadApplicationResume(applicationId: string): Promise<{ blob: Blob; filename: string | null }> {
+  const url = `${API_BASE_URL}/applications/${applicationId}/resume/download`;
+  const token = localStorage.getItem('auth_token');
+  const headers: Record<string, string> = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const response = await fetch(url, { method: 'GET', headers, credentials: 'include' });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ message: response.statusText }));
+    throw new Error((error as { message?: string }).message || `HTTP ${response.status}`);
+  }
+  const disposition = response.headers.get('Content-Disposition');
+  let filename: string | null = null;
+  if (disposition) {
+    const utfMatch = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    const plainMatch = disposition.match(/filename="?([^";]+)"?/i);
+    if (utfMatch?.[1]) filename = decodeURIComponent(utfMatch[1]);
+    else if (plainMatch?.[1]) filename = plainMatch[1];
+  }
+  const blob = await response.blob();
+  return { blob, filename };
 }
 
 export async function getCompanyStats(): Promise<CompanyStats> {
