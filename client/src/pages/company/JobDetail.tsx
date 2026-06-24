@@ -104,6 +104,7 @@ export default function CompanyJobDetail() {
   const [statusAction, setStatusAction] = useState<{ app: Application; newStatus: ApplicationStatus } | null>(null);
   const [selectedApp, setSelectedApp] = useState<Application | null>(null);
   const [resumeViewApp, setResumeViewApp] = useState<Application | null>(null);
+  const [coverLetterViewApp, setCoverLetterViewApp] = useState<Application | null>(null);
   const [resumeDownloadingId, setResumeDownloadingId] = useState<string | null>(null);
   const [minScore, setMinScore] = useState(0);
   const [selectedMatch, setSelectedMatch] = useState<any>(null);
@@ -889,7 +890,7 @@ export default function CompanyJobDetail() {
 
       {/* Application Detail Drawer / Dialog */}
       <Dialog open={!!selectedApp} onOpenChange={() => setSelectedApp(null)}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{selectedApp?.candidate?.name}</DialogTitle>
             <DialogDescription>{selectedApp?.candidate?.headline || selectedApp?.candidate?.email}</DialogDescription>
@@ -922,40 +923,24 @@ export default function CompanyJobDetail() {
                 </div>
               )}
 
-              {(selectedApp.submittedCvText?.trim() || selectedApp.cvFileId) && (
-                <div className="rounded-lg border border-border bg-muted/40 p-4">
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="flex items-start gap-3 min-w-0">
-                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                        <FileText className="h-4 w-4" />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium">Resume</p>
-                        <p className="text-xs text-muted-foreground">
-                          {selectedApp.cvType === 'tailored'
-                            ? 'Tailored CV — downloads as PDF in the same template used at apply time'
-                            : selectedApp.cvFileName
-                              ? `Original uploaded file · ${selectedApp.cvFileName}`
-                              : 'Original CV file submitted with this application'}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap gap-2 shrink-0">
-                      {selectedApp.submittedCvText?.trim() && (
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="gap-1.5"
-                          onClick={() => handleViewApplicationResume(selectedApp)}
-                        >
-                          <Eye className="h-4 w-4" />
-                          {selectedApp.cvType === 'tailored' || !selectedApp.cvFileId ? 'View text' : 'View PDF'}
-                        </Button>
-                      )}
+              {((selectedApp.submittedCvText?.trim() || selectedApp.cvFileId) || selectedApp.coverLetter) && (
+                <div className="flex flex-wrap gap-2">
+                  {(selectedApp.submittedCvText?.trim() || selectedApp.cvFileId) && (
+                    <>
                       <Button
                         type="button"
-                        variant="default"
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5"
+                        disabled={resumeDownloadingId === selectedApp.id}
+                        onClick={() => handleViewApplicationResume(selectedApp)}
+                      >
+                        <Eye className="h-4 w-4" />
+                        View Resume
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
                         size="sm"
                         className="gap-1.5"
                         disabled={resumeDownloadingId === selectedApp.id}
@@ -966,19 +951,22 @@ export default function CompanyJobDetail() {
                         ) : (
                           <Download className="h-4 w-4" />
                         )}
-                        Download PDF
+                        Download Resume
                       </Button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {selectedApp.coverLetter && (
-                <div>
-                  <p className="text-sm font-medium mb-1">Cover Letter</p>
-                  <p className="text-sm text-muted-foreground whitespace-pre-wrap bg-muted p-3 rounded-md">
-                    {selectedApp.coverLetter}
-                  </p>
+                    </>
+                  )}
+                  {selectedApp.coverLetter && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={() => setCoverLetterViewApp(selectedApp)}
+                    >
+                      <FileText className="h-4 w-4" />
+                      View Cover Letter
+                    </Button>
+                  )}
                 </div>
               )}
 
@@ -1045,12 +1033,14 @@ export default function CompanyJobDetail() {
             <DialogTitle>Resume — {resumeViewApp?.candidate?.name}</DialogTitle>
             <DialogDescription>
               {resumeViewApp?.cvType === 'tailored'
-                ? 'Tailored CV text submitted with this application'
-                : 'CV text snapshot from when they applied'}
+                ? 'Tailored CV submitted with this application'
+                : resumeViewApp?.cvFileName
+                  ? `Submitted file: ${resumeViewApp.cvFileName}`
+                  : 'CV submitted with this application'}
             </DialogDescription>
           </DialogHeader>
-          <div className="flex-1 overflow-y-auto rounded-md border bg-muted/30 p-4 text-sm whitespace-pre-wrap leading-relaxed">
-            {resumeViewApp?.submittedCvText?.trim() || 'No resume text available.'}
+          <div className="flex-1 min-h-0 overflow-y-auto rounded-md border bg-muted/30 p-4 text-sm whitespace-pre-wrap leading-relaxed">
+            {resumeViewApp?.submittedCvText?.trim() || 'No resume text available. Use Download Resume for the original file.'}
           </div>
           <DialogFooter className="gap-2 sm:justify-between">
             {resumeViewApp && (
@@ -1066,10 +1056,28 @@ export default function CompanyJobDetail() {
                 ) : (
                   <Download className="h-4 w-4" />
                 )}
-                Download file
+                Download Resume
               </Button>
             )}
             <Button variant="outline" onClick={() => setResumeViewApp(null)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Cover letter preview (application modal) */}
+      <Dialog open={!!coverLetterViewApp} onOpenChange={(open) => !open && setCoverLetterViewApp(null)}>
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Cover Letter — {coverLetterViewApp?.candidate?.name}</DialogTitle>
+            <DialogDescription>Submitted with this application</DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 min-h-0 overflow-y-auto rounded-md border bg-muted/30 p-4 text-sm whitespace-pre-wrap leading-relaxed">
+            {coverLetterViewApp?.coverLetter?.trim() || 'No cover letter available.'}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCoverLetterViewApp(null)}>
               Close
             </Button>
           </DialogFooter>

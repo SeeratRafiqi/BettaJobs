@@ -90,7 +90,13 @@ export async function apiPostBlob(endpoint: string, data: Record<string, unknown
     const error = await response.json().catch(() => ({ message: response.statusText }));
     throw new Error((error as { message?: string }).message || `HTTP ${response.status}`);
   }
-  return response.blob();
+  const blob = await response.blob();
+  const contentType = response.headers.get('Content-Type')?.split(';')[0]?.trim();
+  if (contentType && (!blob.type || blob.type === 'application/octet-stream')) {
+    const buffer = await blob.arrayBuffer();
+    return new Blob([buffer], { type: contentType });
+  }
+  return blob;
 }
 
 // PUT request

@@ -44,6 +44,24 @@ function getLanguageType(languageCode: string): string {
   return LANGUAGE_TO_TTS[code] || 'Auto';
 }
 
+function detectAudioMimeType(buffer: Buffer): string {
+  if (buffer.length >= 4 && buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46) {
+    return 'audio/wav';
+  }
+  if (
+    buffer.length >= 3 &&
+    ((buffer[0] === 0x49 && buffer[1] === 0x44 && buffer[2] === 0x33) ||
+      (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0))
+  ) {
+    return 'audio/mpeg';
+  }
+  return 'audio/wav';
+}
+
+function bufferToAudioResult(buffer: Buffer): { audioBuffer: Buffer; mimeType: string } {
+  return { audioBuffer: buffer, mimeType: detectAudioMimeType(buffer) };
+}
+
 /**
  * Synthesize speech via Alibaba Qwen TTS. Returns audio as Buffer (WAV) for streaming to client.
  */
@@ -99,13 +117,13 @@ export async function synthesizeSpeech(
 
     if (audio.data) {
       const buffer = Buffer.from(audio.data, 'base64');
-      return { audioBuffer: buffer, mimeType: 'audio/wav' };
+      return bufferToAudioResult(buffer);
     }
 
     if (audio.url) {
       const audioRes = await axios.get(audio.url, { responseType: 'arraybuffer', timeout: 15000 });
       const buffer = Buffer.from(audioRes.data);
-      return { audioBuffer: buffer, mimeType: 'audio/wav' };
+      return bufferToAudioResult(buffer);
     }
 
     return null;
@@ -127,12 +145,12 @@ export async function synthesizeSpeech(
         if (!audio) return null;
         if (audio.data) {
           const buffer = Buffer.from(audio.data, 'base64');
-          return { audioBuffer: buffer, mimeType: 'audio/wav' };
+          return bufferToAudioResult(buffer);
         }
         if (audio.url) {
           const audioRes = await axios.get(audio.url, { responseType: 'arraybuffer', timeout: 15000 });
           const buffer = Buffer.from(audioRes.data);
-          return { audioBuffer: buffer, mimeType: 'audio/wav' };
+          return bufferToAudioResult(buffer);
         }
         return null;
       } catch (retryErr: any) {

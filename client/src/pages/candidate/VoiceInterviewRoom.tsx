@@ -65,16 +65,42 @@ function looksLikeAIEcho(transcript: string, lastSpokenQuestion: string | null):
 
 let activeTTSAudio: HTMLAudioElement | null = null;
 let activeTTSObjectUrl: string | null = null;
+/** Bumps when a new speak starts or playback is stopped — stale audio events are ignored. */
+let ttsPlaybackGeneration = 0;
+
+/** Unlock browser audio after a user gesture (Start Interview / enable mic). */
+function unlockVoiceInterviewAudio() {
+  if (typeof window === 'undefined') return;
+  try {
+    const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (Ctx) void new Ctx().resume();
+  } catch {
+    /* ignore */
+  }
+  try {
+    const silent = new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAAB9AAACABAAZGF0YQAAAAA=');
+    silent.volume = 0.01;
+    void silent.play().catch(() => {});
+  } catch {
+    /* ignore */
+  }
+}
 
 function stopVoiceInterviewTTSPlayback() {
+  ttsPlaybackGeneration += 1;
+  if (typeof window !== 'undefined' && window.speechSynthesis?.speaking) {
+    window.speechSynthesis.cancel();
+  }
   if (activeTTSAudio) {
+    const audio = activeTTSAudio;
+    activeTTSAudio = null;
+    audio.onended = null;
+    audio.onerror = null;
     try {
-      activeTTSAudio.pause();
+      audio.pause();
     } catch {
       /* ignore */
     }
-    activeTTSAudio.src = '';
-    activeTTSAudio = null;
   }
   if (activeTTSObjectUrl) {
     URL.revokeObjectURL(activeTTSObjectUrl);
@@ -82,49 +108,127 @@ function stopVoiceInterviewTTSPlayback() {
   }
 }
 
-/** Qwen TTS via POST /api/voice-interviews/tts (auth Bearer token via api client). */
+function resolveSpeechLang(languageCode?: string): string {
+  const lang = (languageCode || 'en').split('-')[0] || 'en';
+  return LANG_BCP47[lang] || languageCode || 'en-US';
+}
+
+/** Browser SpeechSynthesis fallback when Alibaba TTS or HTMLAudio playback fails. */
+function speakWithBrowserTTS(
+  text: string,
+  languageCode: string | undefined,
+  generation: number,
+  onEnd?: () => void,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) {
+      resolve(false);
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = resolveSpeechLang(languageCode);
+    utterance.rate = 1;
+    let settled = false;
+    const settle = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (generation !== ttsPlaybackGeneration) {
+        resolve(false);
+        return;
+      }
+      resolve(ok);
+      if (ok) onEnd?.();
+    };
+    utterance.onend = () => settle(true);
+    utterance.onerror = () => settle(false);
+    window.speechSynthesis.speak(utterance);
+  });
+}
+
+/** Play a TTS blob; returns false if decode/playback fails (caller may fall back to browser TTS). */
+function playTtsBlob(
+  blob: Blob,
+  generation: number,
+  onEnd?: () => void,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (generation !== ttsPlaybackGeneration) {
+      resolve(false);
+      return;
+    }
+    const mime = blob.type && blob.type !== 'application/octet-stream' ? blob.type : 'audio/wav';
+    const typedBlob = blob.type ? blob : new Blob([blob], { type: mime });
+    const url = URL.createObjectURL(typedBlob);
+    activeTTSObjectUrl = url;
+    const audio = new Audio();
+    activeTTSAudio = audio;
+    let settled = false;
+    const settle = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (generation !== ttsPlaybackGeneration) {
+        resolve(false);
+        return;
+      }
+      if (ok) {
+        if (activeTTSObjectUrl) {
+          URL.revokeObjectURL(activeTTSObjectUrl);
+          activeTTSObjectUrl = null;
+        }
+        activeTTSAudio = null;
+        onEnd?.();
+      } else {
+        audio.onended = null;
+        audio.onerror = null;
+        if (activeTTSAudio === audio) activeTTSAudio = null;
+        if (activeTTSObjectUrl === url) {
+          URL.revokeObjectURL(url);
+          activeTTSObjectUrl = null;
+        }
+      }
+      resolve(ok);
+    };
+    audio.onended = () => settle(true);
+    audio.onerror = () => settle(false);
+    audio.src = url;
+    void audio.play().then(() => {}).catch(() => settle(false));
+  });
+}
+
+/** Qwen TTS via POST /api/voice-interviews/tts; falls back to browser speech on failure. */
 async function speakQuestion(
   text: string,
   onEnd?: () => void,
   languageCode?: string,
   onError?: (message: string) => void,
 ) {
-  const finish = () => {
-    onEnd?.();
-  };
   if (!text || typeof window === 'undefined') {
-    finish();
+    onEnd?.();
     return;
   }
   stopVoiceInterviewTTSPlayback();
+  const generation = ttsPlaybackGeneration;
   const lang = (languageCode || 'en').split('-')[0] || 'en';
-  let blob: Blob;
+
+  let played = false;
   try {
-    blob = await synthesizeVoiceInterviewTTS(text, lang);
-  } catch (err) {
-    onError?.(err instanceof Error ? err.message : 'Could not load AI voice audio');
-    finish();
-    return;
+    const blob = await synthesizeVoiceInterviewTTS(text, lang);
+    if (generation === ttsPlaybackGeneration && blob.size > 0) {
+      played = await playTtsBlob(blob, generation, onEnd);
+    }
+  } catch {
+    /* fall through to browser TTS */
   }
-  const url = URL.createObjectURL(blob);
-  activeTTSObjectUrl = url;
-  const audio = new Audio(url);
-  activeTTSAudio = audio;
-  audio.onended = () => {
-    stopVoiceInterviewTTSPlayback();
-    finish();
-  };
-  audio.onerror = () => {
-    onError?.('AI voice playback failed');
-    stopVoiceInterviewTTSPlayback();
-    finish();
-  };
-  try {
-    await audio.play();
-  } catch (err) {
-    onError?.(err instanceof Error ? err.message : 'Could not play AI voice — check browser audio');
-    stopVoiceInterviewTTSPlayback();
-    finish();
+
+  if (generation !== ttsPlaybackGeneration) return;
+
+  if (!played) {
+    const browserOk = await speakWithBrowserTTS(text, languageCode, generation, onEnd);
+    if (!browserOk && generation === ttsPlaybackGeneration) {
+      onError?.('Could not play AI voice. Read the question on screen.');
+      onEnd?.();
+    }
   }
 }
 
@@ -289,7 +393,19 @@ function VoiceInterviewRoom() {
       }, 300);
     };
     void speakQuestion(q, onEnd, lang || 'en', reportTtsError);
+    return () => {
+      stopVoiceInterviewTTSPlayback();
+      setIsAISpeaking(false);
+    };
   }, [session?.currentQuestion, session?.status, interviewLang, reportTtsError]);
+
+  // Stop AI voice when interview is no longer in progress (completed, expired, or navigated away).
+  useEffect(() => {
+    if (session?.status !== 'in_progress') {
+      stopVoiceInterviewTTSPlayback();
+      setIsAISpeaking(false);
+    }
+  }, [session?.status]);
 
   // Camera only — mic is owned by audioStreamRef so STT and UI stay in sync (no dual mic capture).
   useEffect(() => {
@@ -419,8 +535,18 @@ function VoiceInterviewRoom() {
       setInterimTranscript('');
       setExpressionSamples([]);
       if (data.done) {
+        stopVoiceInterviewTTSPlayback();
         stopListening();
         setIsAIThinking(false);
+        setIsAISpeaking(false);
+        lastSpokenQuestionRef.current = null;
+        queryClient.setQueryData(
+          ['voice-interview-session', sessionId],
+          (old: { session?: Record<string, unknown> } | undefined) =>
+            old?.session
+              ? { session: { ...old.session, status: 'completed', currentQuestion: null } }
+              : old,
+        );
         toast({ title: 'Interview completed', description: data.message });
         setLocation(`/candidate/voice-interviews/${sessionId}/report`);
       } else {
@@ -739,9 +865,21 @@ function VoiceInterviewRoom() {
     }
   }, []);
 
+  const stopListeningRef = useRef(stopListening);
+  stopListeningRef.current = stopListening;
+
+  // Tear down mic + AI voice when leaving the interview page (any navigation or refresh).
+  useEffect(() => {
+    return () => {
+      stopVoiceInterviewTTSPlayback();
+      stopListeningRef.current();
+    };
+  }, []);
+
   const handlePlayQuestion = useCallback(() => {
     const q = session?.currentQuestion;
     if (!q) return;
+    unlockVoiceInterviewAudio();
     lastSpokenQuestionRef.current = q;
     setIsAISpeaking(true);
     const lang = interviewLangRef.current || preferredLanguage;
@@ -755,6 +893,7 @@ function VoiceInterviewRoom() {
   }, [stopListening, setLocation]);
 
   const requestCameraAndMic = useCallback(() => {
+    unlockVoiceInterviewAudio();
     navigator.mediaDevices
       .getUserMedia({ video: true, audio: AUDIO_CONSTRAINTS.audio as MediaTrackConstraints })
       .then((stream) => {
@@ -897,7 +1036,10 @@ function VoiceInterviewRoom() {
                 Enable camera & microphone
               </Button>
               <Button
-                onClick={() => startMutation.mutate(undefined)}
+                onClick={() => {
+                  unlockVoiceInterviewAudio();
+                  startMutation.mutate(undefined);
+                }}
                 disabled={startMutation.isPending}
                 className="w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-bold py-4 rounded-xl gap-2"
               >

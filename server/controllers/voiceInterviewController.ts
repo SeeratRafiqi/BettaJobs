@@ -153,6 +153,66 @@ function getSummaryQuestionAnswerTexts(
 /** Minimum substantive answers before generating a partial summary for incomplete sessions. */
 const MIN_ANSWERS_FOR_MIDWAY_SUMMARY = 2;
 
+const CANDIDATE_MIDWAY_PREFIX =
+  'The interview ended before every question was covered. The feedback below is based on the questions you answered.\n\n';
+const RECRUITER_MIDWAY_PREFIX =
+  'Interview ended before all allocated questions were covered.\n\n';
+
+/** Legacy prefixes / wording saved before copy was fixed — strip on read for completed sessions. */
+const LEFT_EARLY_CANDIDATE_RE = /^You left the interview before all questions were completed[^\n]*\n\n/i;
+const LEFT_EARLY_RECRUITER_RE = /^Interview incomplete: the candidate left before all allocated questions were answered\.\n\n/i;
+
+function outcomeHasLeftEarlyWording(text: string | null | undefined): boolean {
+  if (!text?.trim()) return false;
+  return /left the interview before all questions|left before all allocated questions were answered/i.test(text);
+}
+
+function sanitizeInterviewOutcomeText(
+  status: string,
+  text: string | null | undefined,
+  naturallyFinished: boolean
+): string | null {
+  if (!text?.trim()) return text ?? null;
+  const endedNormally = status === 'completed' || naturallyFinished;
+  if (!endedNormally) return text;
+  let result = text;
+  if (result.startsWith(CANDIDATE_MIDWAY_PREFIX)) result = result.slice(CANDIDATE_MIDWAY_PREFIX.length);
+  if (result.startsWith(RECRUITER_MIDWAY_PREFIX)) result = result.slice(RECRUITER_MIDWAY_PREFIX.length);
+  result = result.replace(LEFT_EARLY_CANDIDATE_RE, '');
+  result = result.replace(LEFT_EARLY_RECRUITER_RE, '');
+  return result.trim() || text;
+}
+
+function parseConductorPhase(conductorStateRaw: string | null | undefined): string | null {
+  if (!conductorStateRaw) return null;
+  try {
+    const state = JSON.parse(conductorStateRaw);
+    return typeof state?.phase === 'string' ? state.phase : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True when all allocated questions were answered or the conductor reached closing — even if status is still in_progress (e.g. refresh before final persist). */
+function isNaturallyFinishedInterview(
+  session: { conductor_state?: string | null; max_questions?: number | null; status: string },
+  answers: { questionIndex: number; answerText: string }[]
+): boolean {
+  if (session.status === 'completed') return true;
+  if (parseConductorPhase(session.conductor_state) === 'closing') return true;
+  const allocated = allocatedInterviewQuestionCount(session);
+  const substantive = countSubstantiveInterviewAnswers(answers);
+  return allocated > 0 && substantive >= allocated;
+}
+
+/** True only when the candidate abandoned an active session (not a normal or timed end). */
+function isAbandonedInProgressSession(
+  session: { status: string },
+  naturallyFinished: boolean
+): boolean {
+  return session.status === 'in_progress' && !naturallyFinished;
+}
+
 function countSubstantiveInterviewAnswers(answers: { questionIndex: number; answerText: string }[]): number {
   return answers.filter((a) => {
     const t = (a.answerText || '').trim();
@@ -829,16 +889,28 @@ export const voiceInterviewController = {
       const missingCandidateOutcome = !candidateOutcome || !String(candidateOutcome).trim();
       const missingRecruiterOutcome = !recruiterOutcome || !String(recruiterOutcome).trim();
       const substantiveAnswerCount = countSubstantiveInterviewAnswers(answers);
-      const isIncompleteSession = session.status === 'in_progress' || session.status === 'expired';
+      const naturallyFinished = isNaturallyFinishedInterview(session, answers);
+      if (naturallyFinished && session.status === 'in_progress') {
+        await session.update({
+          status: 'completed',
+          completed_at: session.completed_at ?? new Date(),
+        });
+        session.status = 'completed';
+      }
+      const abandonedInProgress = isAbandonedInProgressSession(session, naturallyFinished);
       const shouldGenerateMidwaySummary =
-        isIncompleteSession &&
+        abandonedInProgress &&
         substantiveAnswerCount >= MIN_ANSWERS_FOR_MIDWAY_SUMMARY &&
         hasAnyContent &&
         missingCandidateOutcome;
+      const shouldRegenerateStaleCompletedOutcome =
+        session.status === 'completed' &&
+        hasAnyContent &&
+        (outcomeHasLeftEarlyWording(candidateOutcome) || outcomeHasLeftEarlyWording(recruiterOutcome));
       const shouldGenerateCompletedSummary =
         session.status === 'completed' &&
         hasAnyContent &&
-        (missingCandidateOutcome || missingRecruiterOutcome);
+        (missingCandidateOutcome || missingRecruiterOutcome || shouldRegenerateStaleCompletedOutcome);
 
       if (shouldGenerateCompletedSummary || shouldGenerateMidwaySummary) {
         try {
@@ -851,12 +923,8 @@ export const voiceInterviewController = {
           let candidateSummary = outcomeResult.candidateSummary;
           let recruiterSummary = outcomeResult.recruiterSummary;
           if (shouldGenerateMidwaySummary) {
-            const candidatePrefix =
-              'You left the interview before all questions were completed. The feedback below is based only on the portion you finished.\n\n';
-            const recruiterPrefix =
-              'Interview incomplete: the candidate left before all allocated questions were answered.\n\n';
-            if (candidateSummary?.trim()) candidateSummary = candidatePrefix + candidateSummary;
-            if (recruiterSummary?.trim()) recruiterSummary = recruiterPrefix + recruiterSummary;
+            if (candidateSummary?.trim()) candidateSummary = CANDIDATE_MIDWAY_PREFIX + candidateSummary;
+            if (recruiterSummary?.trim()) recruiterSummary = RECRUITER_MIDWAY_PREFIX + recruiterSummary;
           }
           if (candidateSummary?.trim()) candidateOutcome = candidateSummary;
           if (recruiterSummary?.trim()) recruiterOutcome = recruiterSummary;
@@ -877,6 +945,17 @@ export const voiceInterviewController = {
         }
       }
 
+      const rawCandidateOutcome = candidateOutcome ?? (session as any).candidate_outcome ?? '';
+      const finalCandidateOutcome =
+        sanitizeInterviewOutcomeText(session.status, rawCandidateOutcome, naturallyFinished) ?? '';
+      if (
+        session.status === 'completed' &&
+        finalCandidateOutcome &&
+        finalCandidateOutcome !== rawCandidateOutcome
+      ) {
+        await session.update({ candidate_outcome: finalCandidateOutcome } as any).catch(() => {});
+      }
+
       return res.json({
         report: {
           id: session.id,
@@ -884,7 +963,7 @@ export const voiceInterviewController = {
           jobTitle: (session as any).job?.title ?? 'Job',
           status: session.status,
           completedAt: session.completed_at,
-          outcome: candidateOutcome ?? (session as any).candidate_outcome ?? '',
+          outcome: finalCandidateOutcome,
           qa,
           allocatedInterviewQuestions: allocatedInterviewQuestionCount(session),
           maxInterviewTurns: session.max_questions ?? null,
@@ -1416,14 +1495,28 @@ export const voiceInterviewController = {
       const missingRecruiterOutcome = !outcome || !String(outcome).trim();
       const missingCandidateOutcome = !candidateOutcomeStored || !String(candidateOutcomeStored).trim();
       const substantiveAnswerCount = countSubstantiveInterviewAnswers(answers);
-      const isIncompleteSession = session.status === 'in_progress' || session.status === 'expired';
+      const naturallyFinished = isNaturallyFinishedInterview(session, answers);
+      if (naturallyFinished && session.status === 'in_progress') {
+        await session.update({
+          status: 'completed',
+          completed_at: session.completed_at ?? new Date(),
+        });
+        session.status = 'completed';
+      }
+      const abandonedInProgress = isAbandonedInProgressSession(session, naturallyFinished);
       const shouldGenerateMidwaySummary =
-        isIncompleteSession &&
+        abandonedInProgress &&
         substantiveAnswerCount >= MIN_ANSWERS_FOR_MIDWAY_SUMMARY &&
         hasAnyContent &&
         missingRecruiterOutcome;
+      const shouldRegenerateStaleCompletedOutcome =
+        session.status === 'completed' &&
+        hasAnyContent &&
+        (outcomeHasLeftEarlyWording(outcome) || outcomeHasLeftEarlyWording(candidateOutcomeStored));
       const shouldGenerateCompletedSummary =
-        session.status === 'completed' && hasAnyContent && (missingRecruiterOutcome || missingCandidateOutcome);
+        session.status === 'completed' &&
+        hasAnyContent &&
+        (missingRecruiterOutcome || missingCandidateOutcome || shouldRegenerateStaleCompletedOutcome);
 
       if (shouldGenerateCompletedSummary || shouldGenerateMidwaySummary) {
         try {
@@ -1436,12 +1529,8 @@ export const voiceInterviewController = {
           let candidateSummary = outcomeResult.candidateSummary;
           let recruiterSummary = outcomeResult.recruiterSummary;
           if (shouldGenerateMidwaySummary) {
-            const candidatePrefix =
-              'You left the interview before all questions were completed. The feedback below is based only on the portion you finished.\n\n';
-            const recruiterPrefix =
-              'Interview incomplete: the candidate left before all allocated questions were answered.\n\n';
-            if (candidateSummary?.trim()) candidateSummary = candidatePrefix + candidateSummary;
-            if (recruiterSummary?.trim()) recruiterSummary = recruiterPrefix + recruiterSummary;
+            if (candidateSummary?.trim()) candidateSummary = CANDIDATE_MIDWAY_PREFIX + candidateSummary;
+            if (recruiterSummary?.trim()) recruiterSummary = RECRUITER_MIDWAY_PREFIX + recruiterSummary;
           }
           if (recruiterSummary?.trim()) outcome = recruiterSummary;
           const cand = await Candidate.findByPk(session.candidate_id, { attributes: ['user_id'] });
@@ -1462,6 +1551,17 @@ export const voiceInterviewController = {
         }
       }
 
+      const rawRecruiterOutcome = outcome ?? session.outcome ?? '';
+      const finalRecruiterOutcome =
+        sanitizeInterviewOutcomeText(session.status, rawRecruiterOutcome, naturallyFinished) ?? '';
+      if (
+        session.status === 'completed' &&
+        finalRecruiterOutcome &&
+        finalRecruiterOutcome !== rawRecruiterOutcome
+      ) {
+        await session.update({ outcome: finalRecruiterOutcome } as any).catch(() => {});
+      }
+
       return res.json({
         report: {
           id: session.id,
@@ -1470,7 +1570,7 @@ export const voiceInterviewController = {
           jobTitle: (session as any).job?.title ?? 'Job',
           status: session.status,
           completedAt: session.completed_at,
-          outcome: outcome ?? '',
+          outcome: finalRecruiterOutcome,
           qa,
           allocatedInterviewQuestions: allocatedInterviewQuestionCount(session),
           maxInterviewTurns: session.max_questions ?? null,
