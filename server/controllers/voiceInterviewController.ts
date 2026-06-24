@@ -125,6 +125,15 @@ function allocatedInterviewQuestionCount(session: { conductor_state?: string | n
   return Math.max(0, max - INTRO_TURNS);
 }
 
+function hasSubstantiveAnswerText(text: string): boolean {
+  const t = (text || '').trim();
+  if (!t || t.length < 3) return false;
+  if (isSilenceAnswer(t) || isSilenceCheckMarker(t)) return false;
+  const lower = t.toLowerCase();
+  if (lower === '(no answer provided)' || lower === '(no answer)' || lower === '(no response)') return false;
+  return true;
+}
+
 /** Inputs for generateVoiceInterviewOutcome: prefer script+indexed answers; fall back if conductor data missing. */
 function getSummaryQuestionAnswerTexts(
   conductorStateRaw: string | null | undefined,
@@ -133,7 +142,7 @@ function getSummaryQuestionAnswerTexts(
   qaTranscriptFallback: { question: string; answer: string }[]
 ): { questionTexts: string[]; answerTexts: string[] } {
   const technical = buildTechnicalQaForSummary(conductorStateRaw, answersData);
-  if (technical.questionTexts.length > 0) return technical;
+  if (technical.questionTexts.length > 0 && technical.answerTexts.some(hasSubstantiveAnswerText)) return technical;
 
   const fromHist = conductorStateRaw ? filterInterviewQaPairsFromConductorState(conductorStateRaw) : { questionTexts: [] as string[], answerTexts: [] as string[] };
   if (fromHist.questionTexts.length > 0) return fromHist;
@@ -148,6 +157,33 @@ function getSummaryQuestionAnswerTexts(
     questionTexts: qaTranscriptFallback.map((x) => (x.question || '').trim()).filter(Boolean),
     answerTexts: qaTranscriptFallback.map((x) => (x.answer || '').trim()),
   };
+}
+
+/** Whether we have enough transcript data to build an AI summary. */
+function hasSummarySourceContent(
+  questionTexts: string[],
+  answerTexts: string[],
+  qa: { question: string; answer: string }[],
+  substantiveAnswerCount: number
+): boolean {
+  if (questionTexts.length > 0) return true;
+  if (answerTexts.some((a) => a.trim().length > 0)) return true;
+  if (qa.some((p) => (p.question || '').trim().length > 0 || (p.answer || '').trim().length > 0)) return true;
+  return substantiveAnswerCount > 0;
+}
+
+/** Resolve Q/A inputs for outcome generation, falling back to full conversation transcript. */
+function resolveOutcomeQaInputs(
+  questionTexts: string[],
+  answerTexts: string[],
+  qa: { question: string; answer: string }[]
+): { questionsForOutcome: string[]; answersForOutcome: string[] } {
+  if (questionTexts.length > 0 && answerTexts.some(hasSubstantiveAnswerText)) {
+    return { questionsForOutcome: questionTexts, answersForOutcome: answerTexts };
+  }
+  const questionsForOutcome = qa.map((x) => (x.question || '').trim()).filter(Boolean);
+  const answersForOutcome = qa.map((x) => (x.answer || '').trim());
+  return { questionsForOutcome, answersForOutcome };
 }
 
 /** Minimum substantive answers before generating a partial summary for incomplete sessions. */
@@ -167,13 +203,19 @@ function outcomeHasLeftEarlyWording(text: string | null | undefined): boolean {
   return /left the interview before all questions|left before all allocated questions were answered/i.test(text);
 }
 
+/** Generic placeholder saved when summary ran without real transcript pairing. */
+function isGenericFallbackOutcome(text: string | null | undefined): boolean {
+  if (!text?.trim()) return false;
+  return /did not provide substantive answers|your answers in this interview were limited/i.test(text);
+}
+
 function sanitizeInterviewOutcomeText(
   status: string,
   text: string | null | undefined,
   naturallyFinished: boolean
 ): string | null {
   if (!text?.trim()) return text ?? null;
-  const endedNormally = status === 'completed' || naturallyFinished;
+  const endedNormally = isReportableEndedSession(status) || naturallyFinished;
   if (!endedNormally) return text;
   let result = text;
   if (result.startsWith(CANDIDATE_MIDWAY_PREFIX)) result = result.slice(CANDIDATE_MIDWAY_PREFIX.length);
@@ -211,6 +253,41 @@ function isAbandonedInProgressSession(
   naturallyFinished: boolean
 ): boolean {
   return session.status === 'in_progress' && !naturallyFinished;
+}
+
+/** Sessions where a full (non-midway) summary should be generated on report load. */
+function isReportableEndedSession(status: string): boolean {
+  return status === 'completed' || status === 'expired';
+}
+
+/** Align DB status with timer / expiry before report generation (mirrors getSession). */
+async function syncVoiceInterviewEndedStatus(
+  session: VoiceInterviewSession & { duration_minutes?: number | null }
+): Promise<void> {
+  const now = new Date();
+  const expired = new Date(session.expires_at) < now;
+  const startedAt = session.started_at ? new Date(session.started_at) : null;
+  const durationMins = session.duration_minutes ?? VOICE_INTERVIEW_DURATION_MINUTES;
+  const durationMs = durationMins * 60 * 1000;
+  const timeLimitExceeded =
+    session.status === 'in_progress' &&
+    startedAt &&
+    now.getTime() - startedAt.getTime() > durationMs;
+  if (timeLimitExceeded || (expired && session.status !== 'completed')) {
+    await session.update({ status: 'expired', updated_at: new Date() });
+    session.status = 'expired';
+  }
+}
+
+function countSubstantiveAnswersFromQa(qa: { answer: string }[]): number {
+  return qa.filter((p) => {
+    const t = (p.answer || '').trim();
+    if (!t || t.length < 3) return false;
+    if (isSilenceAnswer(t) || isSilenceCheckMarker(t)) return false;
+    const lower = t.toLowerCase();
+    if (lower === '(no answer provided)' || lower === '(no answer)' || lower === '(no response)') return false;
+    return true;
+  }).length;
 }
 
 function countSubstantiveInterviewAnswers(answers: { questionIndex: number; answerText: string }[]): number {
@@ -848,6 +925,8 @@ export const voiceInterviewController = {
       });
       if (!session) return res.status(404).json({ message: 'Session not found' });
 
+      await syncVoiceInterviewEndedStatus(session as VoiceInterviewSession & { duration_minutes?: number | null });
+
       let questions: { question: string; order: number }[] = [];
       let answers: { questionIndex: number; answerText: string; answeredAt: string }[] = [];
       try {
@@ -883,12 +962,19 @@ export const voiceInterviewController = {
         questions,
         qa
       );
-      const hasAnyContent =
-        questionTextsForSummary.length > 0 || answerTextsForSummary.some((a) => a.trim().length > 0);
+      const substantiveAnswerCount = Math.max(
+        countSubstantiveInterviewAnswers(answers),
+        countSubstantiveAnswersFromQa(qa)
+      );
+      const hasAnyContent = hasSummarySourceContent(
+        questionTextsForSummary,
+        answerTextsForSummary,
+        qa,
+        substantiveAnswerCount
+      );
 
       const missingCandidateOutcome = !candidateOutcome || !String(candidateOutcome).trim();
       const missingRecruiterOutcome = !recruiterOutcome || !String(recruiterOutcome).trim();
-      const substantiveAnswerCount = countSubstantiveInterviewAnswers(answers);
       const naturallyFinished = isNaturallyFinishedInterview(session, answers);
       if (naturallyFinished && session.status === 'in_progress') {
         await session.update({
@@ -904,21 +990,31 @@ export const voiceInterviewController = {
         hasAnyContent &&
         missingCandidateOutcome;
       const shouldRegenerateStaleCompletedOutcome =
-        session.status === 'completed' &&
+        isReportableEndedSession(session.status) &&
         hasAnyContent &&
-        (outcomeHasLeftEarlyWording(candidateOutcome) || outcomeHasLeftEarlyWording(recruiterOutcome));
+        (outcomeHasLeftEarlyWording(candidateOutcome) ||
+          outcomeHasLeftEarlyWording(recruiterOutcome) ||
+          (substantiveAnswerCount >= MIN_ANSWERS_FOR_MIDWAY_SUMMARY &&
+            (isGenericFallbackOutcome(candidateOutcome) || isGenericFallbackOutcome(recruiterOutcome))));
       const shouldGenerateCompletedSummary =
-        session.status === 'completed' &&
+        isReportableEndedSession(session.status) &&
         hasAnyContent &&
         (missingCandidateOutcome || missingRecruiterOutcome || shouldRegenerateStaleCompletedOutcome);
 
       if (shouldGenerateCompletedSummary || shouldGenerateMidwaySummary) {
         try {
           const jobTitle = (session as any).job?.title ?? 'Job';
+          const { questionsForOutcome, answersForOutcome } = resolveOutcomeQaInputs(
+            questionTextsForSummary,
+            answerTextsForSummary,
+            qa
+          );
           const outcomeResult = await qwenService.generateVoiceInterviewOutcome({
             jobTitle,
-            questions: questionTextsForSummary.length ? questionTextsForSummary : ['Interview completed'],
-            answers: answerTextsForSummary.length ? answerTextsForSummary : ['No answers recorded'],
+            questions: questionsForOutcome.length ? questionsForOutcome : ['Interview completed'],
+            answers: answersForOutcome.some((a) => a.trim().length > 0)
+              ? answersForOutcome
+              : ['No answers recorded'],
           });
           let candidateSummary = outcomeResult.candidateSummary;
           let recruiterSummary = outcomeResult.recruiterSummary;
@@ -949,7 +1045,7 @@ export const voiceInterviewController = {
       const finalCandidateOutcome =
         sanitizeInterviewOutcomeText(session.status, rawCandidateOutcome, naturallyFinished) ?? '';
       if (
-        session.status === 'completed' &&
+        isReportableEndedSession(session.status) &&
         finalCandidateOutcome &&
         finalCandidateOutcome !== rawCandidateOutcome
       ) {
@@ -1264,17 +1360,28 @@ export const voiceInterviewController = {
             let candidateOutcome: string | null = null;
             try {
               await ensureCandidateOutcomeColumn();
+              const qaFallback = buildQaFromConversationHistory(JSON.stringify(updatedState));
               const { questionTexts, answerTexts } = getSummaryQuestionAnswerTexts(
                 JSON.stringify(updatedState),
                 answers,
                 questions,
-                buildQaFromConversationHistory(JSON.stringify(updatedState))
+                qaFallback
               );
-              if (questionTexts.length > 0) {
+              const { questionsForOutcome, answersForOutcome } = resolveOutcomeQaInputs(
+                questionTexts,
+                answerTexts,
+                qaFallback
+              );
+              if (
+                questionsForOutcome.length > 0 ||
+                answersForOutcome.some((a) => a.trim().length > 0)
+              ) {
                 const outcomeResult = await qwenService.generateVoiceInterviewOutcome({
                   jobTitle,
-                  questions: questionTexts,
-                  answers: answerTexts,
+                  questions: questionsForOutcome.length ? questionsForOutcome : ['Interview completed'],
+                  answers: answersForOutcome.some((a) => a.trim().length > 0)
+                    ? answersForOutcome
+                    : ['No answers recorded'],
                   expressionSummary: typeof expressionSummary === 'string' ? expressionSummary : undefined,
                 });
                 recruiterOutcome = outcomeResult.recruiterSummary?.trim() || null;
@@ -1347,12 +1454,26 @@ export const voiceInterviewController = {
         let candidateOutcome: string | null = null;
         try {
           await ensureCandidateOutcomeColumn();
+          const legacyQa = answers.map((a, i) => ({
+            question: (questions[a.questionIndex]?.question ?? questions[i]?.question ?? '').trim(),
+            answer: (a.answerText ?? '').trim(),
+          }));
           const { questionTexts, answerTexts } = filterToInterviewQa(questions, answers);
-          if (questionTexts.length > 0) {
+          const { questionsForOutcome, answersForOutcome } = resolveOutcomeQaInputs(
+            questionTexts,
+            answerTexts,
+            legacyQa
+          );
+          if (
+            questionsForOutcome.length > 0 ||
+            answersForOutcome.some((a) => a.trim().length > 0)
+          ) {
             const outcomeResult = await qwenService.generateVoiceInterviewOutcome({
               jobTitle,
-              questions: questionTexts,
-              answers: answerTexts,
+              questions: questionsForOutcome.length ? questionsForOutcome : ['Interview completed'],
+              answers: answersForOutcome.some((a) => a.trim().length > 0)
+                ? answersForOutcome
+                : ['No answers recorded'],
               expressionSummary: typeof expressionSummary === 'string' ? expressionSummary : undefined,
             });
             recruiterOutcome = outcomeResult.recruiterSummary?.trim() || null;
@@ -1454,6 +1575,8 @@ export const voiceInterviewController = {
       const session = sessions[0] ?? null;
       if (!session) return res.status(404).json({ message: 'No voice interview found for this application.' });
 
+      await syncVoiceInterviewEndedStatus(session as VoiceInterviewSession & { duration_minutes?: number | null });
+
       let questions: { question: string; order: number }[] = [];
       let answers: { questionIndex: number; answerText: string; answeredAt: string }[] = [];
       try {
@@ -1489,12 +1612,19 @@ export const voiceInterviewController = {
         questions,
         qa
       );
-      const hasAnyContent =
-        questionTextsForSummary.length > 0 || answerTextsForSummary.some((a) => a.trim().length > 0);
+      const substantiveAnswerCount = Math.max(
+        countSubstantiveInterviewAnswers(answers),
+        countSubstantiveAnswersFromQa(qa)
+      );
+      const hasAnyContent = hasSummarySourceContent(
+        questionTextsForSummary,
+        answerTextsForSummary,
+        qa,
+        substantiveAnswerCount
+      );
 
       const missingRecruiterOutcome = !outcome || !String(outcome).trim();
       const missingCandidateOutcome = !candidateOutcomeStored || !String(candidateOutcomeStored).trim();
-      const substantiveAnswerCount = countSubstantiveInterviewAnswers(answers);
       const naturallyFinished = isNaturallyFinishedInterview(session, answers);
       if (naturallyFinished && session.status === 'in_progress') {
         await session.update({
@@ -1510,21 +1640,31 @@ export const voiceInterviewController = {
         hasAnyContent &&
         missingRecruiterOutcome;
       const shouldRegenerateStaleCompletedOutcome =
-        session.status === 'completed' &&
+        isReportableEndedSession(session.status) &&
         hasAnyContent &&
-        (outcomeHasLeftEarlyWording(outcome) || outcomeHasLeftEarlyWording(candidateOutcomeStored));
+        (outcomeHasLeftEarlyWording(outcome) ||
+          outcomeHasLeftEarlyWording(candidateOutcomeStored) ||
+          (substantiveAnswerCount >= MIN_ANSWERS_FOR_MIDWAY_SUMMARY &&
+            (isGenericFallbackOutcome(outcome) || isGenericFallbackOutcome(candidateOutcomeStored))));
       const shouldGenerateCompletedSummary =
-        session.status === 'completed' &&
+        isReportableEndedSession(session.status) &&
         hasAnyContent &&
         (missingRecruiterOutcome || missingCandidateOutcome || shouldRegenerateStaleCompletedOutcome);
 
       if (shouldGenerateCompletedSummary || shouldGenerateMidwaySummary) {
         try {
           const jobTitle = (session as any).job?.title ?? 'Job';
+          const { questionsForOutcome, answersForOutcome } = resolveOutcomeQaInputs(
+            questionTextsForSummary,
+            answerTextsForSummary,
+            qa
+          );
           const outcomeResult = await qwenService.generateVoiceInterviewOutcome({
             jobTitle,
-            questions: questionTextsForSummary.length ? questionTextsForSummary : ['Interview completed'],
-            answers: answerTextsForSummary.length ? answerTextsForSummary : ['No answers recorded'],
+            questions: questionsForOutcome.length ? questionsForOutcome : ['Interview completed'],
+            answers: answersForOutcome.some((a) => a.trim().length > 0)
+              ? answersForOutcome
+              : ['No answers recorded'],
           });
           let candidateSummary = outcomeResult.candidateSummary;
           let recruiterSummary = outcomeResult.recruiterSummary;
@@ -1555,7 +1695,7 @@ export const voiceInterviewController = {
       const finalRecruiterOutcome =
         sanitizeInterviewOutcomeText(session.status, rawRecruiterOutcome, naturallyFinished) ?? '';
       if (
-        session.status === 'completed' &&
+        isReportableEndedSession(session.status) &&
         finalRecruiterOutcome &&
         finalRecruiterOutcome !== rawRecruiterOutcome
       ) {

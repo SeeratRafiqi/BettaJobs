@@ -3,7 +3,7 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import { authController } from '../controllers/authController.js';
 import { authenticateToken, buildJwtAccessClaims } from '../middleware/auth.js';
-import { loginLimiter, registerLimiter } from '../middleware/rateLimit.js';
+import { registerLimiter } from '../middleware/rateLimit.js';
 import { validateBody, registerSchema, loginSchema } from '../middleware/validate.js';
 import { User } from '../db/models/User.js';
 import passport from '../utils/passport.js';
@@ -23,7 +23,7 @@ router.get('/google/enabled', (_req: Request, res: Response) => {
 router.post('/register', registerLimiter, express.json(), validateBody(registerSchema), (req, res) =>
   authController.register(req, res)
 );
-router.post('/login', loginLimiter, express.json(), validateBody(loginSchema), (req, res) =>
+router.post('/login', express.json(), validateBody(loginSchema), (req, res) =>
   authController.login(req, res)
 );
 router.post('/logout', (req, res) => authController.logout(req, res));
