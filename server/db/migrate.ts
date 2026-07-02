@@ -96,6 +96,23 @@ async function migrate() {
     const isSqlite = dialect === 'sqlite';
     const useAlter = false; // PostgreSQL alter:true can create duplicate unique indexes.
 
+    if (dialect === 'postgres') {
+      await sequelize.query(`
+        DO $$
+        BEGIN
+          IF to_regclass('public.messages') IS NOT NULL THEN
+            ALTER TABLE messages ADD COLUMN IF NOT EXISTS conversation_id VARCHAR(36);
+            ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_id VARCHAR(36);
+            ALTER TABLE messages ADD COLUMN IF NOT EXISTS content TEXT;
+            ALTER TABLE messages ADD COLUMN IF NOT EXISTS read BOOLEAN NOT NULL DEFAULT false;
+            ALTER TABLE messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW();
+            CREATE INDEX IF NOT EXISTS idx_messages_conversation_created ON messages (conversation_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages (sender_id);
+          END IF;
+        END $$;
+      `);
+    }
+
     const models = [
       { name: 'User', model: User, table: 'users' },
       { name: 'Candidate', model: Candidate, table: 'candidates' },
