@@ -44,17 +44,16 @@ const poolConfig = {
   evict: 1000,
 };
 
-const defaultPortFor = (d: ResolvedDialect) => (d === 'postgres' ? 5432 : 3306);
-
 const sequelize: Sequelize = (() => {
   if (resolvedDialect === 'postgres') {
+    const url = process.env.DATABASE_URL ? new URL(process.env.DATABASE_URL) : null;
     return new Sequelize(
-      process.env.DB_NAME ?? 'jobseek',
-      process.env.DB_USER ?? 'wu_user',
-      process.env.DB_PASSWORD ?? 'ymmv2NH^O1IQ',
+      url?.pathname.slice(1) || process.env.DB_NAME || 'jobseek',
+      decodeURIComponent(url?.username || process.env.DB_USER || 'postgres'),
+      decodeURIComponent(url?.password || process.env.DB_PASSWORD || ''),
       {
-        host: process.env.DB_HOST ?? '47.250.126.192',
-        port: parseInt(process.env.DB_PORT ?? '6543', 10),
+        host: url?.hostname || process.env.DB_HOST || 'localhost',
+        port: parseInt(url?.port || process.env.DB_PORT || '5432', 10),
         dialect: 'postgres',
         logging: getLogging(),
         pool: poolConfig,
