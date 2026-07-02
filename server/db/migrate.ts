@@ -100,6 +100,29 @@ async function migrate() {
       await sequelize.query(`
         DO $$
         BEGIN
+          IF to_regclass('public.users') IS NOT NULL THEN
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS username VARCHAR(255);
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS password VARCHAR(255);
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20);
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255);
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(255);
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW();
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW();
+            UPDATE users SET username = COALESCE(username, email, id) WHERE username IS NULL;
+            UPDATE users SET role = 'candidate' WHERE role IS NULL;
+            UPDATE users SET email = COALESCE(email, username, id || '@example.local') WHERE email IS NULL;
+            UPDATE users SET name = COALESCE(name, username, email, 'User') WHERE name IS NULL;
+            UPDATE users SET password = '' WHERE password IS NULL;
+            ALTER TABLE users ALTER COLUMN username SET NOT NULL;
+            ALTER TABLE users ALTER COLUMN password SET NOT NULL;
+            ALTER TABLE users ALTER COLUMN role SET NOT NULL;
+            ALTER TABLE users ALTER COLUMN email SET NOT NULL;
+            ALTER TABLE users ALTER COLUMN name SET NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS users_username_key ON users (username);
+            CREATE UNIQUE INDEX IF NOT EXISTS users_email_key ON users (email);
+          END IF;
+
           IF to_regclass('public.messages') IS NOT NULL THEN
             ALTER TABLE messages ADD COLUMN IF NOT EXISTS conversation_id VARCHAR(36);
             ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_id VARCHAR(36);
