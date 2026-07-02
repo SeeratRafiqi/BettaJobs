@@ -114,6 +114,36 @@ async function migrate() {
             UPDATE users SET email = COALESCE(email, username, id || '@example.local') WHERE email IS NULL;
             UPDATE users SET name = COALESCE(name, username, email, 'User') WHERE name IS NULL;
             UPDATE users SET password = '' WHERE password IS NULL;
+            WITH duplicate_usernames AS (
+              SELECT
+                ctid,
+                username,
+                ROW_NUMBER() OVER (PARTITION BY username ORDER BY id, ctid) AS row_num
+              FROM users
+              WHERE username IS NOT NULL
+            )
+            UPDATE users u
+            SET username = LEFT(duplicate_usernames.username || '-' || COALESCE(NULLIF(u.id, ''), md5(u.ctid::text)), 255)
+            FROM duplicate_usernames
+            WHERE u.ctid = duplicate_usernames.ctid
+              AND duplicate_usernames.row_num > 1;
+            WITH duplicate_emails AS (
+              SELECT
+                ctid,
+                email,
+                ROW_NUMBER() OVER (PARTITION BY email ORDER BY id, ctid) AS row_num
+              FROM users
+              WHERE email IS NOT NULL
+            )
+            UPDATE users u
+            SET email = LEFT(split_part(duplicate_emails.email, '@', 1), 180)
+              || '+'
+              || COALESCE(NULLIF(u.id, ''), md5(u.ctid::text))
+              || '@'
+              || COALESCE(NULLIF(split_part(duplicate_emails.email, '@', 2), ''), 'example.local')
+            FROM duplicate_emails
+            WHERE u.ctid = duplicate_emails.ctid
+              AND duplicate_emails.row_num > 1;
             ALTER TABLE users ALTER COLUMN username SET NOT NULL;
             ALTER TABLE users ALTER COLUMN password SET NOT NULL;
             ALTER TABLE users ALTER COLUMN role SET NOT NULL;
