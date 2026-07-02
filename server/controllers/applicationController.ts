@@ -30,7 +30,7 @@ let submittedCvFileIdColumnEnsured = false;
 async function ensureSubmittedCvFileIdColumn(): Promise<void> {
   if (submittedCvFileIdColumnEnsured) return;
   try {
-    await sequelize.query('ALTER TABLE applications ADD COLUMN submitted_cv_file_id VARCHAR(36) NULL').catch(() => {});
+    await sequelize.query('ALTER TABLE applications ADD COLUMN IF NOT EXISTS submitted_cv_file_id VARCHAR(36) NULL');
   } catch {
     /* column may already exist */
   }

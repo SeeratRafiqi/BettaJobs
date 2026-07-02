@@ -1,68 +1,59 @@
 import { Sequelize } from 'sequelize';
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-dotenv.config();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
-async function createDatabase() {
-  // Connect without specifying database
-  const connectionConfig: any = {
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || '3306', 10),
-    dialect: 'mysql',
+function quoteIdentifier(identifier: string) {
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+export async function createDatabase() {
+  const url = process.env.DATABASE_URL ? new URL(process.env.DATABASE_URL) : null;
+  const finalDbName = url?.pathname.slice(1) || process.env.DB_NAME || 'jobseek';
+  const dbUser = decodeURIComponent(url?.username || process.env.DB_USER || 'postgres');
+  const dbPassword = decodeURIComponent(url?.password || process.env.DB_PASSWORD || '');
+  const host = url?.hostname || process.env.DB_HOST || 'localhost';
+  const port = parseInt(url?.port || process.env.DB_PORT || '5432', 10);
+
+  const sequelize = new Sequelize('postgres', dbUser, dbPassword, {
+    host,
+    port,
+    dialect: 'postgres',
     logging: false,
-  };
-
-  const dbName = process.env.DB_NAME || 'cv_matcher';
-  const dbUser = process.env.DB_USER || 'wu_user';
-  const dbPassword = process.env.DB_PASSWORD || '';
-
-  // Parse DATABASE_URL if provided
-  let sequelize: Sequelize;
-  let finalDbName = dbName;
-  
-  if (process.env.DATABASE_URL) {
-    const url = new URL(process.env.DATABASE_URL);
-    finalDbName = url.pathname.slice(1); // Remove leading '/'
-    
-    // Connect to MySQL server (without database)
-    sequelize = new Sequelize({
-      host: url.hostname,
-      port: parseInt(url.port || '3306', 10),
-      username: url.username,
-      password: url.password,
-      dialect: 'mysql',
-      logging: false,
-    });
-  } else {
-    sequelize = new Sequelize('', dbUser, dbPassword, connectionConfig);
-  }
+  });
 
   try {
-    // Test connection
     await sequelize.authenticate();
-    console.log('✓ Connected to MySQL server');
+    console.log('Connected to PostgreSQL server');
 
-    // Check if database exists
     const [results] = await sequelize.query(
-      `SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = '${finalDbName}'`
+      'SELECT 1 FROM pg_database WHERE datname = ?',
+      { replacements: [finalDbName] },
     );
 
     if (Array.isArray(results) && results.length === 0) {
-      // Database doesn't exist, create it
-      await sequelize.query(`CREATE DATABASE \`${finalDbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
-      console.log(`✓ Database '${finalDbName}' created successfully`);
+      await sequelize.query(`CREATE DATABASE ${quoteIdentifier(finalDbName)}`);
+      console.log(`Database '${finalDbName}' created successfully`);
     } else {
-      console.log(`✓ Database '${finalDbName}' already exists`);
+      console.log(`Database '${finalDbName}' already exists`);
     }
-
-    await sequelize.close();
-    process.exit(0);
   } catch (error: any) {
     console.error('Failed to create database:', error.message);
     console.error('\nPlease create the database manually:');
-    console.error(`CREATE DATABASE ${finalDbName} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`);
-    process.exit(1);
+    console.error(`CREATE DATABASE ${quoteIdentifier(finalDbName)};`);
+    throw error;
+  } finally {
+    await sequelize.close().catch(() => undefined);
   }
 }
 
-createDatabase();
+const isDirectRun = process.argv[1]?.replace(/\\/g, '/').endsWith('/createDatabase.ts');
+
+if (isDirectRun) {
+  createDatabase()
+    .then(() => process.exit(0))
+    .catch(() => process.exit(1));
+}

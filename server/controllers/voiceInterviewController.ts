@@ -437,7 +437,7 @@ async function ensureOutcomeColumn(): Promise<void> {
         allowNull: true,
       });
     } else {
-      await sequelize.query('ALTER TABLE voice_interview_sessions ADD COLUMN outcome TEXT NULL');
+      await sequelize.query('ALTER TABLE voice_interview_sessions ADD COLUMN IF NOT EXISTS outcome TEXT NULL');
     }
   } catch (e: any) {
     const msg = e?.message ?? '';
@@ -459,7 +459,7 @@ async function ensureCandidateOutcomeColumn(): Promise<void> {
         allowNull: true,
       });
     } else {
-      await sequelize.query('ALTER TABLE voice_interview_sessions ADD COLUMN candidate_outcome TEXT NULL').catch(() => {});
+      await sequelize.query('ALTER TABLE voice_interview_sessions ADD COLUMN IF NOT EXISTS candidate_outcome TEXT NULL');
     }
   } catch (e: any) {
     const msg = e?.message ?? '';
@@ -481,7 +481,7 @@ async function ensureDurationMinutesColumn(): Promise<void> {
         allowNull: true,
       });
     } else {
-      await sequelize.query('ALTER TABLE voice_interview_sessions ADD COLUMN duration_minutes INT NULL');
+      await sequelize.query('ALTER TABLE voice_interview_sessions ADD COLUMN IF NOT EXISTS duration_minutes INT NULL');
     }
   } catch (e: any) {
     const msg = e?.message ?? '';
@@ -503,7 +503,7 @@ async function ensureConductorStateColumn(): Promise<void> {
         allowNull: true,
       });
     } else {
-      await sequelize.query('ALTER TABLE voice_interview_sessions ADD COLUMN conductor_state TEXT NULL');
+      await sequelize.query('ALTER TABLE voice_interview_sessions ADD COLUMN IF NOT EXISTS conductor_state TEXT NULL');
     }
   } catch (e: any) {
     const msg = e?.message ?? '';

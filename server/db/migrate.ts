@@ -87,14 +87,14 @@ async function migrate() {
     // STEP 1: CREATE / SYNC ALL TABLES
     // ===================================================================
     // Models are ordered by dependency (parents first, children after).
-    // We use `alter: true` to auto-add missing columns on existing tables,
+    // We use `alter: true` only for dialects where Sequelize can do it safely,
     // with a fallback to `alter: false` (create-only) if alter fails
-    // (e.g. "Too many keys" on MySQL).
+    // with a fallback to `alter: false` (create-only) if alter fails.
     // ===================================================================
 
     const dialect = sequelize.getDialect();
     const isSqlite = dialect === 'sqlite';
-    const useAlter = !isSqlite; // SQLite has limited ALTER support; just create tables
+    const useAlter = false; // PostgreSQL alter:true can create duplicate unique indexes.
 
     const models = [
       { name: 'User', model: User, table: 'users' },
@@ -134,7 +134,7 @@ async function migrate() {
         console.log(`  ✓ ${name} table recreated`);
       }
     } else {
-      console.log('\nSyncing tables (' + (useAlter ? 'alter: true with fallback' : 'create-only for SQLite') + ')...');
+      console.log('\nSyncing tables (' + (useAlter ? 'alter: true with fallback' : 'create-only') + ')...');
       for (const { name, model, table } of models) {
         try {
           await model.sync({ alter: useAlter });
@@ -142,9 +142,8 @@ async function migrate() {
         } catch (error: any) {
           const msg = error.message || '';
           const parentMsg = error.parent?.message || '';
-          if (msg.includes('Too many keys') || parentMsg.includes('Too many keys')) {
-            // MySQL limit on indexes — fall back to create-only
-            console.warn(`  ⚠️ ${name}: Too many keys — falling back to create-only`);
+          if (msg.includes('index limit') || parentMsg.includes('index limit')) {
+            console.warn(`  ⚠️ ${name}: index limit reached; falling back to create-only`);
             try {
               await sequelize.getQueryInterface().describeTable(table);
               console.log(`  ✓ ${name} table exists (skipped alter)`);
@@ -171,26 +170,26 @@ async function migrate() {
     }
 
     // ===================================================================
-    // STEP 2: SCHEMA PATCHES (MySQL only; safe to re-run, all idempotent)
+    // STEP 2: LEGACY SCHEMA PATCHES (disabled in PostgreSQL config)
     // These handle ENUM changes and columns that `alter: true` may miss.
-    // Skip for SQLite — sync() above is sufficient and raw SQL is MySQL-specific.
+    // Skipped in the current PostgreSQL runtime; model sync above owns schema updates.
     // ===================================================================
-    if (!isSqlite) {
+    if (false) {
       console.log('\nApplying schema patches...');
 
     // ---------- users ----------
     console.log('\n[users]');
     modifyColumn('users', 'role',
-      `ALTER TABLE users MODIFY COLUMN role ENUM('admin','candidate','company') NOT NULL`
+      `ALTER TABLE users ALTER COLUMN role ENUM('admin','candidate','company') NOT NULL`
     );
     await addColumn('users', 'email_verified',
-      `ALTER TABLE users ADD COLUMN email_verified TINYINT(1) NOT NULL DEFAULT 0`
+      `ALTER TABLE users ADD COLUMN email_verified BOOLEAN NOT NULL DEFAULT 0`
     );
     await addColumn('users', 'updated_at',
-      `ALTER TABLE users ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`
+      `ALTER TABLE users ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP`
     );
     await addIndex('users', 'idx_users_email',
-      `ALTER TABLE users ADD UNIQUE INDEX idx_users_email (email)`
+      `ALTER TABLE users ADD CONSTRAINT idx_users_email UNIQUE (email)`
     );
 
     // ---------- candidates ----------
@@ -220,13 +219,13 @@ async function migrate() {
       `ALTER TABLE candidates ADD COLUMN profile_visibility ENUM('public','applied_only','hidden') NOT NULL DEFAULT 'public'`
     );
     await addColumn('candidates', 'show_email',
-      `ALTER TABLE candidates ADD COLUMN show_email TINYINT(1) NOT NULL DEFAULT 0`
+      `ALTER TABLE candidates ADD COLUMN show_email BOOLEAN NOT NULL DEFAULT 0`
     );
     await addColumn('candidates', 'show_phone',
-      `ALTER TABLE candidates ADD COLUMN show_phone TINYINT(1) NOT NULL DEFAULT 0`
+      `ALTER TABLE candidates ADD COLUMN show_phone BOOLEAN NOT NULL DEFAULT 0`
     );
     await addColumn('candidates', 'updated_at',
-      `ALTER TABLE candidates ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`
+      `ALTER TABLE candidates ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP`
     );
 
     // ---------- cv_files ----------
@@ -235,13 +234,13 @@ async function migrate() {
       `ALTER TABLE cv_files ADD COLUMN label VARCHAR(255) NULL`
     );
     await addColumn('cv_files', 'is_primary',
-      `ALTER TABLE cv_files ADD COLUMN is_primary TINYINT(1) NOT NULL DEFAULT 0`
+      `ALTER TABLE cv_files ADD COLUMN is_primary BOOLEAN NOT NULL DEFAULT 0`
     );
     await addColumn('cv_files', 'source_company_id',
       `ALTER TABLE cv_files ADD COLUMN source_company_id VARCHAR(36) NULL`
     );
     await modifyColumn('cv_files', 'status',
-      `ALTER TABLE cv_files MODIFY COLUMN status ENUM('uploaded','parsing','matrix_ready','failed','needs_review') NOT NULL DEFAULT 'uploaded'`
+      `ALTER TABLE cv_files ALTER COLUMN status ENUM('uploaded','parsing','matrix_ready','failed','needs_review') NOT NULL DEFAULT 'uploaded'`
     );
 
     // ---------- jobs ----------
@@ -250,16 +249,16 @@ async function migrate() {
       `ALTER TABLE jobs ADD COLUMN company_id VARCHAR(36) NULL`
     );
     await addColumn('jobs', 'deadline',
-      `ALTER TABLE jobs ADD COLUMN deadline DATETIME NULL`
+      `ALTER TABLE jobs ADD COLUMN deadline TIMESTAMP NULL`
     );
     await addColumn('jobs', 'is_featured',
-      `ALTER TABLE jobs ADD COLUMN is_featured TINYINT(1) NOT NULL DEFAULT 0`
+      `ALTER TABLE jobs ADD COLUMN is_featured BOOLEAN NOT NULL DEFAULT 0`
     );
     await modifyColumn('jobs', 'seniority_level',
-      `ALTER TABLE jobs MODIFY COLUMN seniority_level ENUM('internship','junior','mid','senior','lead','principal') NOT NULL`
+      `ALTER TABLE jobs ALTER COLUMN seniority_level ENUM('internship','junior','mid','senior','lead','principal') NOT NULL`
     );
     await modifyColumn('jobs', 'status',
-      `ALTER TABLE jobs MODIFY COLUMN status ENUM('draft','published','closed') NOT NULL DEFAULT 'draft'`
+      `ALTER TABLE jobs ALTER COLUMN status ENUM('draft','published','closed') NOT NULL DEFAULT 'draft'`
     );
 
     // ---------- matches ----------
@@ -271,7 +270,7 @@ async function migrate() {
     // ---------- applications ----------
     console.log('\n[applications]');
     await modifyColumn('applications', 'status',
-      `ALTER TABLE applications MODIFY COLUMN status ENUM('applied','screening','interview','offer','hired','rejected','withdrawn') NOT NULL DEFAULT 'applied'`
+      `ALTER TABLE applications ALTER COLUMN status ENUM('applied','screening','interview','offer','hired','rejected','withdrawn') NOT NULL DEFAULT 'applied'`
     );
     await addColumn('applications', 'pipeline_stage_id',
       `ALTER TABLE applications ADD COLUMN pipeline_stage_id VARCHAR(36) NULL`
@@ -292,13 +291,13 @@ async function migrate() {
       `ALTER TABLE applications ADD COLUMN match_id VARCHAR(36) NULL`
     );
     await addColumn('applications', 'updated_at',
-      `ALTER TABLE applications ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP`
+      `ALTER TABLE applications ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP`
     );
 
     // ---------- notifications ----------
     console.log('\n[notifications]');
     await modifyColumn('notifications', 'type',
-      `ALTER TABLE notifications MODIFY COLUMN type ENUM(
+      `ALTER TABLE notifications ALTER COLUMN type ENUM(
         'application_received',
         'status_changed',
         'shortlisted',
@@ -316,13 +315,13 @@ async function migrate() {
     // ---------- interview_assessments ----------
     console.log('\n[interview_assessments]');
     await addColumn('interview_assessments', 'reminder_sent_at',
-      `ALTER TABLE interview_assessments ADD COLUMN reminder_sent_at DATETIME NULL`
+      `ALTER TABLE interview_assessments ADD COLUMN reminder_sent_at TIMESTAMP NULL`
     );
     await addColumn('interview_assessments', 'expiry_notified_at',
-      `ALTER TABLE interview_assessments ADD COLUMN expiry_notified_at DATETIME NULL`
+      `ALTER TABLE interview_assessments ADD COLUMN expiry_notified_at TIMESTAMP NULL`
     );
     await addColumn('interview_assessments', 'is_active',
-      `ALTER TABLE interview_assessments ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1`
+      `ALTER TABLE interview_assessments ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1`
     );
 
     // ---------- interview_questions ----------
@@ -395,19 +394,19 @@ async function migrate() {
       `ALTER TABLE conversations ADD COLUMN application_id VARCHAR(36) NULL`
     );
     await addColumn('conversations', 'last_message_at',
-      `ALTER TABLE conversations ADD COLUMN last_message_at DATETIME NULL`
+      `ALTER TABLE conversations ADD COLUMN last_message_at TIMESTAMP NULL`
     );
 
     // ---------- company_members ----------
     console.log('\n[company_members]');
     await addColumn('company_members', 'joined_at',
-      `ALTER TABLE company_members ADD COLUMN joined_at DATETIME NULL`
+      `ALTER TABLE company_members ADD COLUMN joined_at TIMESTAMP NULL`
     );
 
     // ---------- cover_letters ----------
     console.log('\n[cover_letters]');
     await addIndex('cover_letters', 'idx_cover_letters_candidate_job',
-      `ALTER TABLE cover_letters ADD INDEX idx_cover_letters_candidate_job (candidate_id, job_id)`
+      `ALTER TABLE cover_letters ADD CONSTRAINT idx_cover_letters_candidate_job UNIQUE (candidate_id, job_id)`
     );
 
     // ---------- usage_logs ----------

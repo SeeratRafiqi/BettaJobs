@@ -7,7 +7,7 @@ import { CompanyProfile } from '../db/models/CompanyProfile.js';
 import { BaseController } from '../db/base/BaseController.js';
 import { buildJwtAccessClaims, type AuthRequest, type UserRole } from '../middleware/auth.js';
 
-/** Return a user-friendly message when the error is a DB connection failure (e.g. MySQL not running). */
+/** Return a user-friendly message when the error is a DB connection failure. */
 function normalizeDbError(error: any): { message: string; status: number } {
   const msg = error?.message || '';
   const isConnectionRefused =
@@ -18,7 +18,7 @@ function normalizeDbError(error: any): { message: string; status: number } {
   if (isConnectionRefused) {
     return {
       message:
-        'Database is not available. The app requires MySQL. Start MySQL and set DATABASE_URL (or DB_HOST/DB_PORT/DB_USER/DB_PASSWORD) in .env, or see TROUBLESHOOTING.md.',
+        'Database is not available. The app requires PostgreSQL. Start PostgreSQL and set DATABASE_URL (or DB_HOST/DB_PORT/DB_USER/DB_PASSWORD) in .env, or see TROUBLESHOOTING.md.',
       status: 503,
     };
   }

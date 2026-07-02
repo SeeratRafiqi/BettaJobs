@@ -452,8 +452,7 @@ export class CandidateController extends BaseController {
           
           if (candidateEmail && candidateEmail !== '' && candidateEmail.includes('@')) {
             console.log(`[Upload] → Step 7: Checking for duplicate email: ${candidateEmail}...`);
-            // Use MySQL-compatible case-insensitive comparison
-            // LOWER() function works in both MySQL and PostgreSQL
+            // Case-insensitive comparison that works in PostgreSQL.
             const existingCandidate = await Candidate.findOne({ 
               where: sequelize.where(
                 sequelize.fn('LOWER', sequelize.col('email')),
