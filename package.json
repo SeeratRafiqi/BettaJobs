@@ -15,6 +15,7 @@
     "db:fix-indexes": "tsx server/db/fixIndexes.ts",
     "db:verify": "tsx server/db/verify.ts",
     "db:seed": "tsx server/db/seed.ts",
+    "db:reset-admin": "tsx server/db/resetAdmin.ts",
     "db:clear-cvs": "tsx server/db/clearCvs.ts",
     "db:clear-jobs": "tsx server/db/clearJobs.ts",
     "setup": "tsx server/setup.ts",
